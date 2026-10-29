@@ -1,8 +1,11 @@
 // api/dashboard/[id].js
 //
-// Server-side aggregator: fetches a dashboard, then for each visualization
-// item it resolves the definition, extracts dimensions, and fetches the
-// analytics data. Returns one combined JSON to the browser.
+// Server-side aggregator: fetches a dashboard, then for each item it resolves
+// the visualization definition, extracts dimensions, and fetches analytics data.
+// Returns one combined JSON to the browser.
+//
+// Supports: VISUALIZATION (charts + pivot tables), TEXT, MAP.
+// Other types (APP, EVENT_*, MESSAGES, ...) are reported as skipped.
 //
 // Route: GET /api/dashboard/{dashboardId}
 // Env:   DHIS2_BASE  (default: https://play.im.dhis2.org/dev)
@@ -138,13 +141,14 @@ async function fetchAnalytics(dims, auth) {
     return `/api/analytics.json?${params.join("&")}`;
   };
 
-  // 1st attempt: raw IDs
+  // 1st attempt: raw IDs (indicators, data elements)
   try {
     return await dhisFetch(buildUrl(dims.dx), auth);
   } catch (err) {
     if (!isInvalidDxError(err)) throw err;
   }
-  // 2nd attempt: with reporting-rate suffix
+
+  // 2nd attempt: with reporting-rate suffix (data sets)
   let lastErr;
   for (const metric of REPORTING_METRICS) {
     const dxWithMetric = dims.dx.map(id =>
@@ -198,10 +202,9 @@ export default async function handler(req, res) {
     );
 
     const rawItems = dash.dashboardItems || [];
-    // Sort by DHIS2 grid position
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
-    // 2. Resolve each item (with limited concurrency)
+    // 2. Resolve each item
     const items = await pMap(
       rawItems,
       async (item, idx) => {
@@ -212,14 +215,34 @@ export default async function handler(req, res) {
           position: { x: item.x, y: item.y, w: item.w, h: item.h },
         };
 
+        // ---------- TEXT ----------
         if (item.type === "TEXT") {
           return { ...base, text: item.text || "" };
         }
 
+        // ---------- MAP ----------
+        if (item.type === "MAP") {
+          const mapId =
+            item.map?.id ||
+            (typeof item.map === "string" ? item.map : null) ||
+            item.visualization?.id ||
+            null;
+          return {
+            ...base,
+            mapId,
+            mapLink: mapId
+              ? `${DHIS2_BASE}/dhis-web-maps/#/${mapId}`
+              : null,
+            dashboardLink: `${DHIS2_BASE}/dhis-web-dashboard/#/${id}`,
+          };
+        }
+
+        // ---------- OTHER non-visualization types ----------
         if (item.type !== "VISUALIZATION") {
           return { ...base, skipped: true, reason: `${item.type} not supported` };
         }
 
+        // ---------- VISUALIZATION ----------
         const vizId =
           typeof item.visualization === "string"
             ? item.visualization
@@ -229,15 +252,37 @@ export default async function handler(req, res) {
 
         try {
           const { viz, dims } = await fetchVizAndDims(vizId, auth);
-          if (!CHARTABLE_TYPES.has(viz.type)) {
+
+          const isPivotTable = viz.type === "PIVOT_TABLE";
+          const isChartable  = CHARTABLE_TYPES.has(viz.type);
+
+          if (!isPivotTable && !isChartable) {
             return {
               ...base,
               name: viz.displayName || base.name,
               skipped: true,
-              reason: `${viz.type} not chartable`,
+              reason: `${viz.type} not supported`,
             };
           }
+
           const data = await fetchAnalytics(dims, auth);
+
+          // ---- PIVOT TABLE ----
+          if (isPivotTable) {
+            return {
+              ...base,
+              name: viz.displayName || base.name,
+              vizType: "PIVOT_TABLE",
+              data,
+              layout: {
+                columns: viz.columns || [],
+                rows:    viz.rows    || [],
+                filters: viz.filters || [],
+              },
+            };
+          }
+
+          // ---- CHART ----
           return {
             ...base,
             name: viz.displayName || base.name,
