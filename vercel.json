@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/dhis/:match*",
+      "destination": "https://play.im.dhis2.org/dev/:match*"
+    }
+  ]
+}
