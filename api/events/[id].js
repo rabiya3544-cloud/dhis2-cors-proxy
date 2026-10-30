@@ -99,6 +99,37 @@ export default async function handler(req, res) {
     const debug = [];
 
     for (const item of rawItems) {
+      // 🛠️ NEW: Handle APP items
+      if (item.type === "APP") {
+        eventItems.push({
+          type: "APP",
+          id: item.id,
+          name: item.displayName || item.appKey || "App",
+          appUrl: `${DHIS2_BASE}/dhis-web-apps/apps/${item.appKey}/index.html`,
+          position: { x: item.x, y: item.y, w: item.width, h: item.height }
+        });
+        continue;
+      }
+
+      // 🛠️ NEW: Handle RESOURCES items
+      if (item.type === "RESOURCES") {
+        try {
+          const resIds = item.resources.map(r => r.id).join(",");
+          const resData = await dhisFetch(`/api/documents.json?filter=id:in:[${resIds}]&fields=id,displayName`, auth);
+          const docs = resData.documents || [];
+          
+          eventItems.push({
+            type: "RESOURCES",
+            id: item.id,
+            name: item.displayName || "Resources",
+            resources: docs,
+            position: { x: item.x, y: item.y, w: item.width, h: item.height }
+          });
+        } catch (e) {
+          debug.push(`Failed to fetch resources: ${e.message}`);
+        }
+        continue;
+      }
       let vizId = null;
 
       if (item.type === "EVENT_CHART") {
