@@ -172,31 +172,42 @@ export default async function handler(req, res) {
     const rawItems = dash.dashboardItems || [];
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
-    // --- FETCH MESSAGES (INTERPRETATIONS) ---
+    // --- FETCH ALL MESSAGES ---
     let dashboardMessages = [];
-    let rawMessages = []; // <-- NEW: Store all messages for console.log
+    let rawMessages = []; 
     
-    if (rawItems.some(i => i.type === "MESSAGES")) {
-      try {
-        const interpUrl = `/api/interpretations.json?pageSize=100&fields=id,text,type,visualization[id,displayName],user[displayName]`;
-        const interpData = await dhisFetch(interpUrl, auth);
-        const allInterps = interpData.interpretations || [];
-        
-        rawMessages = allInterps; // <-- NEW: Save unfiltered list
+    try {
+      // 1. Fetch up to 500 messages, asking for ALL possible link types (visualization, map, eventReport, etc.)
+      const interpUrl = `/api/interpretations.json?pageSize=500&fields=id,text,type,visualization[id],map[id],eventReport[id],eventChart[id],eventVisualization[id],user[displayName]`;
+      const interpData = await dhisFetch(interpUrl, auth);
+      const allInterps = interpData.interpretations || [];
+      rawMessages = allInterps;
 
-        // KEEP FILTERING LOGIC
-        const vizIds = rawItems
-          .filter(i => i.type === "VISUALIZATION")
-          .map(i => i.visualization?.id || i.visualization)
-          .filter(id => typeof id === "string");
+      // 2. Extract ALL possible object IDs from the dashboard items
+      const objectIds = rawItems
+        .map(i => 
+          i.visualization?.id || i.map?.id || i.eventReport?.id || 
+          i.eventChart?.id || i.eventVisualization?.id ||
+          (typeof i.visualization === "string" ? i.visualization : null) ||
+          (typeof i.map === "string" ? i.map : null)
+        )
+        .filter(id => typeof id === "string");
 
-        dashboardMessages = allInterps.filter(interp => 
-          interp.visualization && vizIds.includes(interp.visualization.id)
-        );
+      // 3. Match the messages against ANY of those IDs
+      dashboardMessages = allInterps.filter(interp => {
+        const linkedIds = [
+          interp.visualization?.id,
+          interp.map?.id,
+          interp.eventReport?.id,
+          interp.eventChart?.id,
+          interp.eventVisualization?.id
+        ].filter(Boolean);
         
-      } catch (e) {
-        console.warn("Could not fetch interpretations:", e.message);
-      }
+        return linkedIds.some(linkId => objectIds.includes(linkId));
+      });
+      
+    } catch (e) {
+      console.warn("Could not fetch interpretations:", e.message);
     }
 
     const items = await pMap(
@@ -211,7 +222,7 @@ export default async function handler(req, res) {
 
         if (item.type === "TEXT") return { ...base, text: item.text || "" };
         
-        // <-- NEW: Pass rawMessages to the frontend as well
+        // Pass BOTH filtered messages and raw messages to frontend
         if (item.type === "MESSAGES") return { ...base, messages: dashboardMessages, rawMessages: rawMessages };
 
         if (item.type === "MAP") {
@@ -259,6 +270,9 @@ export default async function handler(req, res) {
       },
       5
     );
+
+    // Removed the synthetic injection. We rely purely on DHIS2's dashboardItems array.
+    // If DHIS2 sends a MESSAGES item, we build the card. If not, we don't.
 
     res.status(200).json({
       dashboard: { id: dash.id, name: dash.displayName || dash.name || id, itemCount: items.length, loadedAt: new Date().toISOString() },
