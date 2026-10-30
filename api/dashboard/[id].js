@@ -42,10 +42,11 @@ function isInvalidDxError(err) { return /E7124|E7102|dimension options/i.test(er
 function isMissingTableError(err) { return /42P01|referenced table does not exist/i.test(err.message) || err.dhisErrorCode === "E7103"; }
 
 async function fetchVizAndDims(vizId, auth) {
+  // 🛠️ Removed "value" from the fields. Event Visualizations reject the "value" field, causing the fallback to fail silently.
   const fields = [
     "id", "displayName", "type", "columns[dimension,items[id]]", "rows[dimension,items[id]]", "filters[dimension,items[id]]",
     "relativePeriods", "userOrganisationUnit", "userOrganisationUnitChildren", "userOrganisationUnitGrandChildren", 
-    "program", "programStage", "value"
+    "program", "programStage"
   ].join(",");
 
   let viz = null;
@@ -146,9 +147,6 @@ async function fetchEventAnalytics(viz, auth) {
   if (ouItems.length) params.push(`dimension=ou:${[...new Set(ouItems)].join(";")}`);
   else params.push(`dimension=ou:USER_ORGUNIT`);
 
-  if (viz.value && viz.value.id) params.push(`value=${viz.value.id}`);
-  else if (viz.value) params.push(`value=${viz.value}`);
-
   const url = `/api/analytics/events/aggregate/${stageId}.json?${params.join("&")}`;
   return await dhisFetch(url, auth);
 }
@@ -183,6 +181,7 @@ export default async function handler(req, res) {
   try {
     const dash = await dhisFetch(`/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`, auth);
     
+    // Filter out MESSAGES
     let rawItems = (dash.dashboardItems || []).filter(i => i.type !== "MESSAGES");
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
@@ -216,6 +215,7 @@ export default async function handler(req, res) {
 
         try {
           const { viz, dims } = await fetchVizAndDims(vizId, auth);
+          
           const isEvent = !!(viz.program || viz.programStage);
           const isPivotTable = viz.type === "PIVOT_TABLE";
           const isChartable  = CHARTABLE_TYPES.has(viz.type);
