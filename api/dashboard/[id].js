@@ -175,36 +175,23 @@ export default async function handler(req, res) {
     // --- FETCH MESSAGES (INTERPRETATIONS) ---
     let dashboardMessages = [];
     if (rawItems.some(i => i.type === "MESSAGES")) {
-      // 1. Get all possible object IDs on this dashboard
-      const objectIds = rawItems
-        .map(i => 
-          i.visualization?.id || i.map?.id || i.eventReport?.id || 
-          i.eventChart?.id || i.eventVisualization?.id || 
-          (typeof i.visualization === "string" ? i.visualization : null) ||
-          (typeof i.map === "string" ? i.map : null)
-        )
-        .filter(id => typeof id === "string");
-
       try {
-        // 2. Fetch interpretations asking for ALL possible link types
-        const interpData = await dhisFetch(
-          `/api/interpretations.json?pageSize=100&fields=id,text,created,user[displayName],comments[text,created,user[displayName]],visualization[id],map[id],eventReport[id],eventChart[id],eventVisualization[id]`, 
-          auth
-        );
+        // The EXACT endpoint that worked in your JSON viewer
+        const interpUrl = `/api/interpretations.json?pageSize=100&fields=id,text,type,visualization[id,displayName],user[displayName]`;
+        const interpData = await dhisFetch(interpUrl, auth);
         const allInterps = interpData.interpretations || [];
         
-        // 3. Filter for any interpretation that matches ANY of the object IDs
-        dashboardMessages = allInterps.filter(interp => {
-          const linkedIds = [
-            interp.visualization?.id,
-            interp.map?.id,
-            interp.eventReport?.id,
-            interp.eventChart?.id,
-            interp.eventVisualization?.id
-          ].filter(Boolean);
-          
-          return linkedIds.some(linkId => objectIds.includes(linkId));
-        });
+        // Get all Visualization IDs present on this dashboard
+        const vizIds = rawItems
+          .filter(i => i.type === "VISUALIZATION")
+          .map(i => i.visualization?.id || i.visualization)
+          .filter(id => typeof id === "string");
+
+        // Match them up
+        dashboardMessages = allInterps.filter(interp => 
+          interp.visualization && vizIds.includes(interp.visualization.id)
+        );
+        
       } catch (e) {
         console.warn("Could not fetch interpretations:", e.message);
       }
