@@ -175,21 +175,36 @@ export default async function handler(req, res) {
     // --- FETCH MESSAGES (INTERPRETATIONS) ---
     let dashboardMessages = [];
     if (rawItems.some(i => i.type === "MESSAGES")) {
-      const vizIds = rawItems
-        .filter(i => i.type === "VISUALIZATION" || i.type === "MAP")
-        .map(i => i.visualization?.id || i.map?.id || i.visualization || i.map)
+      // 1. Get all possible object IDs on this dashboard
+      const objectIds = rawItems
+        .map(i => 
+          i.visualization?.id || i.map?.id || i.eventReport?.id || 
+          i.eventChart?.id || i.eventVisualization?.id || 
+          (typeof i.visualization === "string" ? i.visualization : null) ||
+          (typeof i.map === "string" ? i.map : null)
+        )
         .filter(id => typeof id === "string");
 
       try {
+        // 2. Fetch interpretations asking for ALL possible link types
         const interpData = await dhisFetch(
-          `/api/interpretations.json?pageSize=100&fields=id,text,created,user[displayName],comments[text,created,user[displayName]],visualization[id]`, 
+          `/api/interpretations.json?pageSize=100&fields=id,text,created,user[displayName],comments[text,created,user[displayName]],visualization[id],map[id],eventReport[id],eventChart[id],eventVisualization[id]`, 
           auth
         );
         const allInterps = interpData.interpretations || [];
         
-        dashboardMessages = allInterps.filter(interp => 
-          interp.visualization && vizIds.includes(interp.visualization.id)
-        );
+        // 3. Filter for any interpretation that matches ANY of the object IDs
+        dashboardMessages = allInterps.filter(interp => {
+          const linkedIds = [
+            interp.visualization?.id,
+            interp.map?.id,
+            interp.eventReport?.id,
+            interp.eventChart?.id,
+            interp.eventVisualization?.id
+          ].filter(Boolean);
+          
+          return linkedIds.some(linkId => objectIds.includes(linkId));
+        });
       } catch (e) {
         console.warn("Could not fetch interpretations:", e.message);
       }
