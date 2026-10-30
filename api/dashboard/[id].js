@@ -15,7 +15,7 @@ const RELATIVE_PERIOD_MAP = {
 
 const CHARTABLE_TYPES = new Set([
   "LINE", "AREA", "STACKED_AREA", "YEAR_OVER_YEAR_LINE", "COLUMN", "BAR", "STACKED_COLUMN", "STACKED_BAR", "YEAR_OVER_YEAR_COLUMN",
-  "PIE", "RADAR", "GAUGE", "SCATTER", "BUBBLE",
+  "PIE", "RADAR", "GAUGE", "SCATTER", "BUBBLE", "PIVOT_TABLE"
 ]);
 
 const REPORTING_METRICS = ["REPORTING_RATE", "REPORTING_RATE_ON_TIME", "ACTUAL_REPORTS", "ACTUAL_REPORTS_ON_TIME", "EXPECTED_REPORTS"];
@@ -42,27 +42,31 @@ function isInvalidDxError(err) { return /E7124|E7102|dimension options/i.test(er
 function isMissingTableError(err) { return /42P01|referenced table does not exist/i.test(err.message) || err.dhisErrorCode === "E7103"; }
 
 async function fetchVizAndDims(vizId, auth) {
-  // 🛠️ Removed "value" from the fields. Event Visualizations reject the "value" field, causing the fallback to fail silently.
-  const fields = [
-    "id", "displayName", "type", "columns[dimension,items[id]]", "rows[dimension,items[id]]", "filters[dimension,items[id]]",
-    "relativePeriods", "userOrganisationUnit", "userOrganisationUnitChildren", "userOrganisationUnitGrandChildren", 
-    "program", "programStage"
-  ].join(",");
-
   let viz = null;
+  let isEventType = false;
+
+  // 🛠️ Try standard visualization first
   try {
-    viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth);
+    viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json`, auth);
   } catch (e) {}
 
+  // 🛠️ If it has no program, it's likely an Event visualization. Try all Event endpoints.
   if (!viz || (!viz.program && !viz.programStage)) {
-    try {
-      const ev = await dhisFetch(`/api/eventVisualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth);
-      if (ev) viz = ev;
-    } catch (e) {
-      if (!viz) throw new Error(`Failed to fetch visualization ${vizId}`);
+    const endpoints = ["eventVisualizations", "eventCharts", "eventReports"];
+    for (const ep of endpoints) {
+      try {
+        const ev = await dhisFetch(`/api/${ep}/${encodeURIComponent(vizId)}.json`, auth);
+        if (ev) {
+          viz = ev;
+          isEventType = true;
+          break; // Found the event data
+        }
+      } catch (e) {}
     }
   }
   
+  if (!viz) throw new Error(`Failed to fetch visualization data for ${vizId}`);
+
   const dims = { dx: [], pe: [], ou: [] };
   const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
   for (const axis of axes) {
@@ -87,7 +91,7 @@ async function fetchVizAndDims(vizId, auth) {
   if (!dims.pe.length) dims.pe.push("LAST_12_MONTHS");
   if (!dims.ou.length) dims.ou.push("USER_ORGUNIT");
 
-  return { viz, dims };
+  return { viz, dims, isEventType };
 }
 
 async function fetchAnalytics(dims, auth) {
@@ -147,6 +151,9 @@ async function fetchEventAnalytics(viz, auth) {
   if (ouItems.length) params.push(`dimension=ou:${[...new Set(ouItems)].join(";")}`);
   else params.push(`dimension=ou:USER_ORGUNIT`);
 
+  if (viz.value && viz.value.id) params.push(`value=${viz.value.id}`);
+  else if (viz.value) params.push(`value=${viz.value}`);
+
   const url = `/api/analytics/events/aggregate/${stageId}.json?${params.join("&")}`;
   return await dhisFetch(url, auth);
 }
@@ -181,7 +188,6 @@ export default async function handler(req, res) {
   try {
     const dash = await dhisFetch(`/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`, auth);
     
-    // Filter out MESSAGES
     let rawItems = (dash.dashboardItems || []).filter(i => i.type !== "MESSAGES");
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
@@ -214,9 +220,10 @@ export default async function handler(req, res) {
         if (!vizId) return { ...base, error: "No visualization linked to this item." };
 
         try {
-          const { viz, dims } = await fetchVizAndDims(vizId, auth);
+          const { viz, dims, isEventType } = await fetchVizAndDims(vizId, auth);
           
-          const isEvent = !!(viz.program || viz.programStage);
+          // Force Event detection if the API flagged it or if we know it's an Event Type
+          const isEvent = isEventType || !!(viz.program || viz.programStage) || viz.type === "EVENT_VISUALIZATION" || viz.type === "EVENT_CHART" || viz.type === "EVENT_REPORT";
           const isPivotTable = viz.type === "PIVOT_TABLE";
           const isChartable  = CHARTABLE_TYPES.has(viz.type);
 
