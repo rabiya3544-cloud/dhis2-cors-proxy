@@ -26,51 +26,50 @@ async function dhisFetch(path, auth) {
   return res.json();
 }
 
-async function fetchEventAnalytics(viz, auth) {
-  let stageId = null;
-  if (viz.programStage) stageId = typeof viz.programStage === 'string' ? viz.programStage : viz.programStage.id;
-  else if (viz.program) stageId = typeof viz.program === 'string' ? viz.program : viz.program.id;
-  if (!stageId) throw new Error("Event visualization missing program or stage ID.");
-
+// Unified parameter builder for both Event charts and Group Set pivots
+function buildQueryParams(viz) {
   const params = [];
   const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
-  
-  let peItems = [];
-  let ouItems = [];
-  
+
+  const dataDims = [];
   for (const axis of axes) {
-    if (axis.dimension === "pe") {
-      if (axis.items && axis.items.length) peItems = axis.items.map(i => i.id);
-    } else if (axis.dimension === "ou") {
-      if (axis.items && axis.items.length) ouItems = axis.items.map(i => i.id);
-    } else {
-      if (axis.items && axis.items.length) {
-        params.push(`dimension=${axis.dimension}:${axis.items.map(i => i.id).join(";")}`);
-      } else {
-        params.push(`dimension=${axis.dimension}`);
+    const dimId = axis.id || axis.dimension;
+    if (!dimId || dimId === "pe" || dimId === "ou") continue;
+
+    if (axis.items && axis.items.length) {
+      for (const item of axis.items) {
+        if (item.id) dataDims.push(item.id);
       }
+    } else {
+      dataDims.push(dimId);
     }
   }
-  
+
+  for (const d of [...new Set(dataDims)]) {
+    params.push(`dimension=${d}`);
+  }
+
+  // Periods
+  const peItems = [];
   const rel = viz.relativePeriods || {};
   for (const [flag, pid] of Object.entries(RELATIVE_PERIOD_MAP)) {
     if (rel[flag]) peItems.push(pid);
   }
+  params.push(`dimension=pe:${peItems.length ? [...new Set(peItems)].join(";") : "LAST_12_MONTHS"}`);
+
+  // Org Units
+  const ouItems = [];
   if (viz.userOrganisationUnit) ouItems.push("USER_ORGUNIT");
   if (viz.userOrganisationUnitChildren) ouItems.push("USER_ORGUNIT_CHILDREN");
   if (viz.userOrganisationUnitGrandChildren) ouItems.push("USER_ORGUNIT_GRANDCHILDREN");
-  
-  if (peItems.length) params.push(`dimension=pe:${[...new Set(peItems)].join(";")}`);
-  else params.push(`dimension=pe:LAST_12_MONTHS`);
-  
-  if (ouItems.length) params.push(`dimension=ou:${[...new Set(ouItems)].join(";")}`);
-  else params.push(`dimension=ou:USER_ORGUNIT`);
+  if (viz.organisationUnits && Array.isArray(viz.organisationUnits)) {
+    for (const ou of viz.organisationUnits) {
+      if (ou.id) ouItems.push(ou.id);
+    }
+  }
+  params.push(`dimension=ou:${ouItems.length ? [...new Set(ouItems)].join(";") : "USER_ORGUNIT"}`);
 
-  if (viz.value && viz.value.id) params.push(`value=${viz.value.id}`);
-  else if (viz.value) params.push(`value=${viz.value}`);
-
-  const url = `/api/analytics/events/aggregate/${stageId}.json?${params.join("&")}`;
-  return await dhisFetch(url, auth);
+  return params.join("&");
 }
 
 export default async function handler(req, res) {
@@ -92,90 +91,77 @@ export default async function handler(req, res) {
     const rawItems = dash.dashboardItems || [];
 
     const eventItems = [];
+    const debug = [];
 
     for (const item of rawItems) {
       let vizId = null;
 
-      // 1. Extract IDs based on the exact types we saw in Inpatient Discharge
       if (item.type === "EVENT_CHART") {
-        vizId = item.eventChart?.id || item.eventVisualization?.id || item.id;
+        vizId = item.eventChart?.id || item.eventVisualization?.id;
       } else if (item.type === "EVENT_REPORT") {
-        vizId = item.eventReport?.id || item.eventVisualization?.id || item.id;
+        vizId = item.eventReport?.id || item.eventVisualization?.id;
       } else if (item.type === "EVENT_VISUALIZATION") {
-        vizId = item.eventVisualization?.id || item.visualization?.id || item.id;
+        vizId = item.eventVisualization?.id || item.visualization?.id;
       } else if (item.type === "VISUALIZATION") {
-        vizId = item.visualization?.id || item.id;
+        vizId = item.visualization?.id;
       }
 
       if (!vizId) continue;
 
       try {
+        // 1. Try eventVisualizations first (since both Disease and Inpatient use this)
         let viz = null;
-        const endpoints = ["eventVisualizations", "eventCharts", "eventReports", "visualizations"];
-        
-        for (const ep of endpoints) {
-          try {
-            const ev = await dhisFetch(`/api/${ep}/${encodeURIComponent(vizId)}.json`, auth);
-            if (ev) { viz = ev; break; }
-          } catch (e) {}
+        try {
+          viz = await dhisFetch(`/api/eventVisualizations/${encodeURIComponent(vizId)}.json`, auth);
+        } catch (e) {
+          // Fallback to standard visualizations (Disease chart might live here)
+          viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json`, auth);
         }
 
         if (!viz) continue;
 
         const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
-        const dxItems = axes.filter(a => a.dimension === "dx").flatMap(a => a.items || []);
+        const dxItems = axes.filter(a => (a.id || a.dimension) === "dx").flatMap(a => a.items || []);
 
         let data = null;
-        let vizType = viz.type;
 
-        // Handle Pivot Tables with group sets (no dx)
+        // --- CASE A: Group Set Pivot Table (Disease) ---
         if (viz.type === "PIVOT_TABLE" && dxItems.length === 0) {
-          const params = [];
-          for (const axis of axes) {
-            if (axis.id && axis.id !== "pe" && axis.id !== "ou") {
-              params.push(`dimension=${axis.id}`);
-            }
-          }
-          const rel = viz.relativePeriods || {};
-          const peItems = [];
-          for (const [flag, pid] of Object.entries(RELATIVE_PERIOD_MAP)) {
-            if (rel[flag]) peItems.push(pid);
-          }
-          params.push(`dimension=pe:${peItems.length ? [...new Set(peItems)].join(";") : "LAST_12_MONTHS"}`);
-          
-          const ouItems = [];
-          if (viz.userOrganisationUnit) ouItems.push("USER_ORGUNIT");
-          if (viz.userOrganisationUnitChildren) ouItems.push("USER_ORGUNIT_CHILDREN");
-          if (viz.userOrganisationUnitGrandChildren) ouItems.push("USER_ORGUNIT_GRANDCHILDREN");
-          params.push(`dimension=ou:${ouItems.length ? [...new Set(ouItems)].join(";") : "USER_ORGUNIT"}`);
-
-          data = await dhisFetch(`/api/analytics.json?${params.join("&")}`, auth);
+          const params = buildQueryParams(viz);
+          data = await dhisFetch(`/api/analytics.json?${params}`, auth);
         } 
-        // Handle Event Charts / Reports
+        // --- CASE B: Event Chart / Report (Inpatient) ---
         else if (viz.program || viz.programStage) {
-          data = await fetchEventAnalytics(viz, auth);
+          let stageId = viz.programStage?.id || viz.programStage || viz.program?.id || viz.program;
+          if (!stageId) throw new Error("Missing program/stage ID");
+          
+          const params = buildQueryParams(viz);
+          data = await dhisFetch(`/api/analytics/events/aggregate/${stageId}.json?${params}`, auth);
         } 
         else {
           continue; // Skip standard charts
         }
 
-        if (!data) continue;
+        if (!data || !data.rows || !data.rows.length) {
+          debug.push(`No data rows for ${vizId} (${viz.displayName})`);
+          continue;
+        }
 
         eventItems.push({
           id: vizId,
-          name: viz.displayName || item.displayName || "Event Chart",
-          vizType: vizType,
+          name: viz.displayName || item.displayName || "Chart",
+          vizType: viz.type,
           data: data,
           layout: { columns: viz.columns || [], rows: viz.rows || [], filters: viz.filters || [] },
           position: { x: item.x, y: item.y, w: item.width, h: item.height }
         });
 
       } catch (e) {
-        console.warn(`Events endpoint skipped ${vizId}: ${e.message}`);
+        debug.push(`Failed ${vizId}: ${e.message}`);
       }
     }
 
-    res.status(200).json({ events: eventItems });
+    res.status(200).json({ events: eventItems, _debug: debug });
   } catch (err) {
     console.error("[events aggregator]", err);
     res.status(500).json({ error: err.message });
