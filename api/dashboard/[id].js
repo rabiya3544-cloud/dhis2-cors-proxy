@@ -11,7 +11,7 @@
 // Env:   DHIS2_BASE  (default: https://play.im.dhis2.org/dev)
 //        DHIS2_AUTH  (default: Basic admin:district, base64)
 
-const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/stable";
+const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/stable-2-43-1";
 const DEFAULT_AUTH =
   process.env.DHIS2_AUTH ||
   "Basic " + Buffer.from("admin:district").toString("base64");
