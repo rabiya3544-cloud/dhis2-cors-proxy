@@ -1,5 +1,5 @@
 // api/dashboard/[id].js
-const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/dev";
+const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/stable-2-43-2-1";
 const DEFAULT_AUTH = process.env.DHIS2_AUTH || "Basic " + Buffer.from("admin:district").toString("base64");
 
 const RELATIVE_PERIOD_MAP = {
