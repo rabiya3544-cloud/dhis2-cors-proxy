@@ -1,55 +1,29 @@
 // api/dashboard/[id].js
-// Simplified, robust version. Directly targets the /dev server,
-// mirroring the exact logic that we know works from the client-side test.
-
 const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/dev";
-const DEFAULT_AUTH =
-  process.env.DHIS2_AUTH ||
-  "Basic " + Buffer.from("admin:district").toString("base64");
+const DEFAULT_AUTH = process.env.DHIS2_AUTH || "Basic " + Buffer.from("admin:district").toString("base64");
 
 const RELATIVE_PERIOD_MAP = {
-  thisDay: "TODAY", yesterday: "YESTERDAY",
-  last3Days: "LAST_3_DAYS", last7Days: "LAST_7_DAYS",
-  last14Days: "LAST_14_DAYS", last30Days: "LAST_30_DAYS",
-  lastMonth: "LAST_MONTH", lastBimonth: "LAST_BIMONTH",
-  lastQuarter: "LAST_QUARTER", lastSixMonth: "LAST_SIX_MONTH",
-  weeksThisYear: "WEEKS_THIS_YEAR", monthsThisYear: "MONTHS_THIS_YEAR",
-  biMonthsThisYear: "BIMONTHS_THIS_YEAR", quartersThisYear: "QUARTERS_THIS_YEAR",
-  thisYear: "THIS_YEAR", monthsLastYear: "MONTHS_LAST_YEAR",
-  quartersLastYear: "QUARTERS_LAST_YEAR", lastYear: "LAST_YEAR",
-  last5Years: "LAST_5_YEARS", last12Months: "LAST_12_MONTHS",
-  last6Months: "LAST_6_MONTHS", last3Months: "LAST_3_MONTHS",
-  last6Bimonth: "LAST_6_BIMONTHS", last6Quarter: "LAST_6_QUARTERS",
-  last4Quarters: "LAST_4_QUARTERS", last2SixMonths: "LAST_2_SIXMONTHS",
-  thisFinancialYear: "THIS_FINANCIAL_YEAR", lastFinancialYear: "LAST_FINANCIAL_YEAR",
-  last5FinancialYears: "LAST_5_FINANCIAL_YEARS",
-  thisMonth: "THIS_MONTH", thisBimonth: "THIS_BIMONTH",
-  thisQuarter: "THIS_QUARTER", thisSixMonth: "THIS_SIX_MONTH",
+  thisDay: "TODAY", yesterday: "YESTERDAY", last3Days: "LAST_3_DAYS", last7Days: "LAST_7_DAYS",
+  last14Days: "LAST_14_DAYS", last30Days: "LAST_30_DAYS", lastMonth: "LAST_MONTH", lastBimonth: "LAST_BIMONTH",
+  lastQuarter: "LAST_QUARTER", lastSixMonth: "LAST_SIX_MONTH", weeksThisYear: "WEEKS_THIS_YEAR", monthsThisYear: "MONTHS_THIS_YEAR",
+  biMonthsThisYear: "BIMONTHS_THIS_YEAR", quartersThisYear: "QUARTERS_THIS_YEAR", thisYear: "THIS_YEAR", monthsLastYear: "MONTHS_LAST_YEAR",
+  quartersLastYear: "QUARTERS_LAST_YEAR", lastYear: "LAST_YEAR", last5Years: "LAST_5_YEARS", last12Months: "LAST_12_MONTHS",
+  last6Months: "LAST_6_MONTHS", last3Months: "LAST_3_MONTHS", last6Bimonth: "LAST_6_BIMONTHS", last6Quarter: "LAST_6_QUARTERS",
+  last4Quarters: "LAST_4_QUARTERS", last2SixMonths: "LAST_2_SIXMONTHS", thisFinancialYear: "THIS_FINANCIAL_YEAR", lastFinancialYear: "LAST_FINANCIAL_YEAR",
+  last5FinancialYears: "LAST_5_FINANCIAL_YEARS", thisMonth: "THIS_MONTH", thisBimonth: "THIS_BIMONTH", thisQuarter: "THIS_QUARTER", thisSixMonth: "THIS_SIX_MONTH",
 };
 
 const CHARTABLE_TYPES = new Set([
-  "LINE", "AREA", "STACKED_AREA", "YEAR_OVER_YEAR_LINE",
-  "COLUMN", "BAR", "STACKED_COLUMN", "STACKED_BAR", "YEAR_OVER_YEAR_COLUMN",
+  "LINE", "AREA", "STACKED_AREA", "YEAR_OVER_YEAR_LINE", "COLUMN", "BAR", "STACKED_COLUMN", "STACKED_BAR", "YEAR_OVER_YEAR_COLUMN",
   "PIE", "RADAR", "GAUGE", "SCATTER", "BUBBLE",
 ]);
 
-const REPORTING_METRICS = [
-  "REPORTING_RATE",
-  "REPORTING_RATE_ON_TIME",
-  "ACTUAL_REPORTS",
-  "ACTUAL_REPORTS_ON_TIME",
-  "EXPECTED_REPORTS",
-];
+const REPORTING_METRICS = ["REPORTING_RATE", "REPORTING_RATE_ON_TIME", "ACTUAL_REPORTS", "ACTUAL_REPORTS_ON_TIME", "EXPECTED_REPORTS"];
 
-function buildAuth(req) {
-  return req.headers.authorization || DEFAULT_AUTH;
-}
+function buildAuth(req) { return req.headers.authorization || DEFAULT_AUTH; }
 
 async function dhisFetch(path, auth) {
-  const url = `${DHIS2_BASE}${path}`;
-  const res = await fetch(url, {
-    headers: { Authorization: auth, Accept: "application/json" },
-  });
+  const res = await fetch(`${DHIS2_BASE}${path}`, { headers: { Authorization: auth, Accept: "application/json" } });
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
     const peek = await res.text();
@@ -64,31 +38,13 @@ async function dhisFetch(path, auth) {
   return res.json();
 }
 
-function isInvalidDxError(err) {
-  return (
-    /E7124|E7102|dimension options/i.test(err.message) ||
-    err.dhisErrorCode === "E7124" ||
-    err.dhisErrorCode === "E7102"
-  );
-}
-
-function isMissingTableError(err) {
-  return (
-    /42P01|referenced table does not exist/i.test(err.message) ||
-    err.dhisErrorCode === "E7103"
-  );
-}
+function isInvalidDxError(err) { return /E7124|E7102|dimension options/i.test(err.message) || err.dhisErrorCode === "E7124" || err.dhisErrorCode === "E7102"; }
+function isMissingTableError(err) { return /42P01|referenced table does not exist/i.test(err.message) || err.dhisErrorCode === "E7103"; }
 
 async function fetchVizAndDims(vizId, auth) {
   const fields = [
-    "id", "displayName", "type",
-    "columns[dimension,items[id]]",
-    "rows[dimension,items[id]]",
-    "filters[dimension,items[id]]",
-    "relativePeriods",
-    "userOrganisationUnit",
-    "userOrganisationUnitChildren",
-    "userOrganisationUnitGrandChildren",
+    "id", "displayName", "type", "columns[dimension,items[id]]", "rows[dimension,items[id]]", "filters[dimension,items[id]]",
+    "relativePeriods", "userOrganisationUnit", "userOrganisationUnitChildren", "userOrganisationUnitGrandChildren", "program", "programStage"
   ].join(",");
   const viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth);
   
@@ -113,7 +69,6 @@ async function fetchVizAndDims(vizId, auth) {
   dims.pe = [...new Set(dims.pe)];
   dims.ou = [...new Set(dims.ou)];
 
-  if (!dims.dx.length) throw new Error("No data items (dx) in visualization.");
   if (!dims.pe.length) dims.pe.push("LAST_12_MONTHS");
   if (!dims.ou.length) dims.ou.push("USER_ORGUNIT");
 
@@ -122,26 +77,14 @@ async function fetchVizAndDims(vizId, auth) {
 
 async function fetchAnalytics(dims, auth) {
   const buildUrl = dxItems => {
-    const params = [
-      `dimension=dx:${dxItems.join(";")}`,
-      `dimension=pe:${dims.pe.join(";")}`,
-      `dimension=ou:${dims.ou.join(";")}`,
-    ];
+    const params = [`dimension=dx:${dxItems.join(";")}`, `dimension=pe:${dims.pe.join(";")}`, `dimension=ou:${dims.ou.join(";")}`];
     return `/api/analytics.json?${params.join("&")}`;
   };
-
-  try {
-    return await dhisFetch(buildUrl(dims.dx), auth);
-  } catch (err) {
-    if (!isInvalidDxError(err)) throw err;
-  }
-
+  try { return await dhisFetch(buildUrl(dims.dx), auth); } catch (err) { if (!isInvalidDxError(err)) throw err; }
   let lastErr;
   for (const metric of REPORTING_METRICS) {
     const dxWithMetric = dims.dx.map(id => id.includes(".") ? id : `${id}.${metric}`);
-    try {
-      return await dhisFetch(buildUrl(dxWithMetric), auth);
-    } catch (err) {
+    try { return await dhisFetch(buildUrl(dxWithMetric), auth); } catch (err) {
       lastErr = err;
       if (!isInvalidDxError(err)) throw err;
     }
@@ -150,14 +93,8 @@ async function fetchAnalytics(dims, auth) {
 }
 
 async function pMap(items, fn, concurrency = 5) {
-  const results = new Array(items.length);
-  let i = 0;
-  const worker = async () => {
-    while (i < items.length) {
-      const idx = i++;
-      results[idx] = await fn(items[idx], idx);
-    }
-  };
+  const results = new Array(items.length); let i = 0;
+  const worker = async () => { while (i < items.length) { const idx = i++; results[idx] = await fn(items[idx], idx); } };
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
   return results;
 }
@@ -177,13 +114,10 @@ export default async function handler(req, res) {
   const auth = buildAuth(req);
 
   try {
-    // 1. Fetch dashboard definition
     const dash = await dhisFetch(`/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`, auth);
-
     const rawItems = dash.dashboardItems || [];
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
-    // 2. Resolve each item
     const items = await pMap(
       rawItems,
       async (item, idx) => {
@@ -198,14 +132,14 @@ export default async function handler(req, res) {
           return { ...base, text: item.text || "" };
         }
 
+        // --- NEW: Handle MESSAGES ---
+        if (item.type === "MESSAGES") {
+          return { ...base, messages: item.messages || [] };
+        }
+
         if (item.type === "MAP") {
           const mapId = item.map?.id || (typeof item.map === "string" ? item.map : null) || item.visualization?.id || null;
-          return {
-            ...base,
-            mapId,
-            mapLink: mapId ? `${DHIS2_BASE}/dhis-web-maps/#/${mapId}` : null,
-            dashboardLink: `${DHIS2_BASE}/dhis-web-dashboard/#/${id}`,
-          };
+          return { ...base, mapId, mapLink: mapId ? `${DHIS2_BASE}/dhis-web-maps/#/${mapId}` : null };
         }
 
         if (item.type !== "VISUALIZATION") {
@@ -217,6 +151,18 @@ export default async function handler(req, res) {
 
         try {
           const { viz, dims } = await fetchVizAndDims(vizId, auth);
+          
+          // --- NEW: Correctly identify Event Pivot Tables ---
+          if (!dims.dx.length) {
+            const isEvent = viz.program || viz.programStage;
+            return { 
+              ...base, 
+              name: viz.displayName || base.name, 
+              skipped: true, 
+              reason: isEvent ? "Event/Tracker Pivot Table (requires event API)" : "No data items found" 
+            };
+          }
+
           const isPivotTable = viz.type === "PIVOT_TABLE";
           const isChartable  = CHARTABLE_TYPES.has(viz.type);
 
@@ -239,7 +185,6 @@ export default async function handler(req, res) {
           return { ...base, name: viz.displayName || base.name, vizType: viz.type, data };
 
         } catch (err) {
-          // Gracefully handle missing analytics tables for specific items
           if (isMissingTableError(err)) {
             return { ...base, error: "Data unavailable: The server's analytics tables for this specific chart are currently being rebuilt." };
           }
@@ -253,7 +198,6 @@ export default async function handler(req, res) {
       dashboard: { id: dash.id, name: dash.displayName || dash.name || id, itemCount: items.length, loadedAt: new Date().toISOString() },
       items,
     });
-
   } catch (err) {
     console.error("[dashboard aggregator]", err);
     res.status(500).json({ error: err.message });
