@@ -35,7 +35,6 @@ function buildQueryParams(viz) {
   for (const axis of axes) {
     const dimId = axis.id || axis.dimension;
     if (!dimId || dimId === "pe" || dimId === "ou") continue;
-
     if (axis.items && axis.items.length) {
       for (const item of axis.items) {
         if (item.id) dataDims.push(item.id);
@@ -44,10 +43,7 @@ function buildQueryParams(viz) {
       dataDims.push(dimId);
     }
   }
-
-  for (const d of [...new Set(dataDims)]) {
-    params.push(`dimension=${d}`);
-  }
+  for (const d of [...new Set(dataDims)]) params.push(`dimension=${d}`);
 
   // Periods
   const peItems = [];
@@ -75,7 +71,6 @@ function buildQueryParams(viz) {
 async function fetchEventAnalytics(viz, auth) {
   const programId = viz.program?.id || viz.program;
   const stageId = viz.programStage?.id || viz.programStage;
-  
   if (!programId) throw new Error("Event visualization missing program ID.");
 
   const params = buildQueryParams(viz);
@@ -109,7 +104,6 @@ export default async function handler(req, res) {
     for (const item of rawItems) {
       let vizId = null;
 
-      // Identify IDs based on type
       if (item.type === "EVENT_CHART") {
         vizId = item.eventChart?.id || item.eventVisualization?.id;
       } else if (item.type === "EVENT_REPORT") {
@@ -124,12 +118,9 @@ export default async function handler(req, res) {
 
       try {
         let viz = null;
-        
-        // Fetch full definition. Try eventVisualizations first (handles both Event Charts and Group Sets)
         try {
           viz = await dhisFetch(`/api/eventVisualizations/${encodeURIComponent(vizId)}.json`, auth);
         } catch (e) {
-          // Fallback to standard visualizations
           viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json`, auth);
         }
 
@@ -150,7 +141,7 @@ export default async function handler(req, res) {
           data = await fetchEventAnalytics(viz, auth);
         } 
         else {
-          continue; // Skip standard charts (handled by main endpoint)
+          continue; // Skip standard charts
         }
 
         if (!data || !data.rows || !data.rows.length) {
@@ -159,6 +150,9 @@ export default async function handler(req, res) {
         }
 
         eventItems.push({
+          // 🛠️ FIX: Add type so the frontend renders it.
+          // 'vizType' dictates whether it draws a Chart (AREA, LINE) or Table (PIVOT_TABLE).
+          type: "VISUALIZATION",
           id: vizId,
           name: viz.displayName || item.displayName || "Chart",
           vizType: viz.type,
