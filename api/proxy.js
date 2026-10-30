@@ -21,6 +21,13 @@ export default async function handler(req, res) {
     delete headersToForward.referer;
     delete headersToForward['accept-encoding'];
     delete headersToForward['content-length'];
+    
+    // 👇 ADD THIS: Inject default auth if none is provided by the browser 👇
+    if (!headersToForward.authorization) {
+      headersToForward.authorization = "Basic " + Buffer.from("admin:district").toString("base64");
+    }
+    // 👆 ----------------------------------------------------------------- 👆
+
     headersToForward['user-agent'] = headersToForward['user-agent'] || 'Vercel-Proxy';
 
     const controller = new AbortController();
@@ -30,7 +37,7 @@ export default async function handler(req, res) {
       method: req.method,
       headers: headersToForward,
       body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
-      redirect: 'follow',
+      redirect: 'follow', // This is what caused the HTML to be returned
       signal: controller.signal
     });
 
@@ -43,12 +50,9 @@ export default async function handler(req, res) {
       res.setHeader('Content-Type', contentType);
     }
 
-    // 👇 ADD THIS BLOCK RIGHT HERE 👇
-    // If DHIS2 returned a successful response (200 OK), tell Vercel to cache it
     if (response.ok) {
       res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
     }
-    // 👆 END OF BLOCK 👆
 
     const body = await response.arrayBuffer();
     
@@ -60,14 +64,9 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error('Proxy error:', error);
-    
     if (error.name === 'AbortError') {
-      return res.status(504).json({ 
-        error: 'Gateway Timeout', 
-        details: 'The DHIS2 server took too long to respond. It might be rebuilding its analytics tables.' 
-      });
+      return res.status(504).json({ error: 'Gateway Timeout' });
     }
-    
     res.status(500).json({ error: 'Proxy request failed', details: error.message });
   }
 }
