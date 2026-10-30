@@ -157,7 +157,7 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
-  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
@@ -169,56 +169,10 @@ export default async function handler(req, res) {
 
   try {
     const dash = await dhisFetch(`/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`, auth);
-    const rawItems = dash.dashboardItems || [];
-    rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
-
-    // --- FETCH MESSAGES (INTERPRETATIONS) ---
-    let dashboardMessages = [];
-    let rawMessages = [];
-    let matchDebug = [];
-    let dashboardItemIds = []; // <-- NEW: Shows what charts are actually on the dashboard
     
-    try {
-      const interpUrl = `/api/interpretations.json?pageSize=500&fields=id,text,created,user[displayName],comments[text,created,user[displayName]],visualization[id],map[id],eventVisualization[id],eventReport[id],eventChart[id]`;
-      const interpData = await dhisFetch(interpUrl, auth);
-      rawMessages = interpData.interpretations || [];
-
-      // 1. Populate dashboardItemIds for debugging
-      dashboardItemIds = rawItems.map(i => {
-        const linkedId = 
-          i.visualization?.id || 
-          i.map?.id || 
-          i.eventVisualization?.id || 
-          i.eventReport?.id || 
-          i.eventChart?.id || 
-          "NO_LINKED_ID";
-        return `${i.type} (itemId: ${i.id}) -> LinkedId: ${linkedId}`;
-      });
-
-      const dashItemsString = JSON.stringify(rawItems);
-
-      dashboardMessages = rawMessages.filter(interp => {
-        const linkedId = 
-          interp.visualization?.id || 
-          interp.map?.id || 
-          interp.eventVisualization?.id || 
-          interp.eventReport?.id || 
-          interp.eventChart?.id;
-          
-        const isMatch = linkedId && dashItemsString.includes(linkedId);
-        
-        matchDebug.push({
-          textSnippet: interp.text.substring(0, 30),
-          linkedId: linkedId || "NO_ID",
-          foundInDashboard: isMatch
-        });
-
-        return isMatch;
-      });
-
-    } catch (e) {
-      console.warn("Could not fetch interpretations:", e.message);
-    }
+    // 🛠️ FILTER OUT MESSAGES COMPLETELY
+    let rawItems = (dash.dashboardItems || []).filter(i => i.type !== "MESSAGES");
+    rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
     const items = await pMap(
       rawItems,
@@ -231,8 +185,6 @@ export default async function handler(req, res) {
         };
 
         if (item.type === "TEXT") return { ...base, text: item.text || "" };
-        
-        if (item.type === "MESSAGES") return { ...base, messages: dashboardMessages, rawMessages: rawMessages, matchDebug: matchDebug, dashboardItemIds: dashboardItemIds };
 
         if (item.type === "MAP") {
           const mapId = item.map?.id || (typeof item.map === "string" ? item.map : null) || item.visualization?.id || null;
@@ -285,19 +237,6 @@ export default async function handler(req, res) {
       },
       5
     );
-
-    if (dashboardMessages.length > 0 && !items.some(i => i.type === "MESSAGES")) {
-      items.push({
-        index: items.length,
-        type: "MESSAGES",
-        name: "Messages",
-        position: { x: 0, y: 0, w: 0, h: 0 },
-        messages: dashboardMessages,
-        rawMessages: rawMessages,
-        matchDebug: matchDebug,
-        dashboardItemIds: dashboardItemIds
-      });
-    }
 
     res.status(200).json({
       dashboard: { id: dash.id, name: dash.displayName || dash.name || id, itemCount: items.length, loadedAt: new Date().toISOString() },
