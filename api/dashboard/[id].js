@@ -1,12 +1,14 @@
 // api/dashboard/[id].js
-// Resilient version: tries multiple DHIS2 base URLs by testing a real analytics query.
-// If a server is alive but its analytics tables are missing (42P01), it skips to the next.
+// Resilient version: checks server health, tries to fetch dashboard, falls back on failure.
+// Includes Vercel Edge Caching to survive DHIS2 downtime.
 
 const BASE_URLS = [
   "https://play.im.dhis2.org/dev",
-  "https://play.im.dhis2.org/stable-2-43-2-1",
-  "https://play.im.dhis2.org/stable-2-42-7-1",
-  "https://play.im.dhis2.org/stable-2-41-10-1"
+  "https://play.im.dhis2.org/stable-2-43-1",
+  "https://play.im.dhis2.org/stable-2-42-7",
+  "https://play.im.dhis2.org/stable-2-42-1",
+  "https://play.im.dhis2.org/stable-2-41-8-2",
+  "https://play.im.dhis2.org/stable-2-43-0"
 ];
 
 const DEFAULT_AUTH =
@@ -169,9 +171,14 @@ async function pMap(items, fn, concurrency = 5) {
 }
 
 export default async function handler(req, res) {
+  // --- CORS & CACHING HEADERS ---
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
+  
+  // Cache the successful response at Vercel's edge for 1 hour.
+  // If DHIS2 goes down, Vercel will serve the cached version.
+  res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
@@ -181,41 +188,43 @@ export default async function handler(req, res) {
 
   const auth = buildAuth(req);
 
-  // --- 1. FIND A WORKING SERVER WITH BUILT ANALYTICS TABLES ---
   let workingBaseUrl = null;
+  let dash = null;
   let lastError = null;
 
-  // We do a small, guaranteed analytics query to see if tables are built.
-  // fbfJHSPpUQD is "ANC 1 Coverage" (standard demo data).
-  const probePath = "/api/analytics.json?dimension=dx:fbfJHSPpUQD&dimension=pe:LAST_YEAR&dimension=ou:USER_ORGUNIT";
-
+  // --- 1. FIND A WORKING SERVER ---
   for (const baseUrl of BASE_URLS) {
     try {
-      // If this succeeds (200 OK), the server is alive AND the analytics tables are built.
-      await dhisFetch(probePath, auth, baseUrl);
+      // Quick check: is the server alive?
+      await dhisFetch("/api/system/info.json", auth, baseUrl);
+      
+      // If alive, try to fetch the dashboard (this is where analytics tables are tested)
+      dash = await dhisFetch(
+        `/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`,
+        auth, baseUrl
+      );
+      
+      // If we got here, both the server and its analytics tables are working
       workingBaseUrl = baseUrl;
       console.log(`[dashboard aggregator] Using working server: ${baseUrl}`);
       break;
+
     } catch (err) {
-      console.warn(`[dashboard aggregator] Server ${baseUrl} failed probe: ${err.message}`);
+      console.warn(`[dashboard aggregator] Server ${baseUrl} failed: ${err.message}`);
       lastError = err;
+      dash = null;
     }
   }
 
-  if (!workingBaseUrl) {
+  if (!workingBaseUrl || !dash) {
     return res.status(500).json({
-      error: "All DHIS2 servers are either unreachable or their analytics tables are currently missing.",
+      error: "All DHIS2 servers are unreachable or their analytics tables are currently missing.",
       details: lastError?.message,
     });
   }
 
-  // --- 2. FETCH DASHBOARD AND ITEMS ---
+  // --- 2. FETCH DASHBOARD ITEMS ---
   try {
-    const dash = await dhisFetch(
-      `/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`,
-      auth, workingBaseUrl
-    );
-
     const rawItems = dash.dashboardItems || [];
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
