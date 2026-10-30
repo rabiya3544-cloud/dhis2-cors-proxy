@@ -18,18 +18,6 @@ const CHARTABLE_TYPES = new Set([
   "PIE", "RADAR", "GAUGE", "SCATTER", "BUBBLE"
 ]);
 
-const REPORTING_METRICS = ["REPORTING_RATE", "REPORTING_RATE_ON_TIME", "ACTUAL_REPORTS", "ACTUAL_REPORTS_ON_TIME", "EXPECTED_REPORTS"];
-
-// BUG FIX 1: include `items` on columns/rows/filters so axes come back fully populated
-const VIZ_FIELDS = [
-  "id", "displayName", "type",
-  "columns[id,dimension,items[id,dimension]]",
-  "rows[id,dimension,items[id,dimension]]",
-  "filters[id,dimension,items[id,dimension]]",
-  "relativePeriods", "userOrganisationUnit", "userOrganisationUnitChildren", "userOrganisationUnitGrandChildren",
-  "program", "programStage", "organisationUnits[id]"
-].join(",");
-
 function buildAuth(req) { return req.headers.authorization || DEFAULT_AUTH; }
 
 async function dhisFetch(path, auth) {
@@ -41,124 +29,231 @@ async function dhisFetch(path, auth) {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(`DHIS2 ${res.status}: ${body.message || res.statusText}`);
+    const err = new Error(`HTTP ${res.status}: ${body.message || res.statusText}`);
+    err.dhisErrorCode = body.errorCode;
+    throw err;
   }
   return res.json();
 }
 
-// BUG FIX 2: extract items from actual axis objects, not just relativePeriods/user flags
-function extractDimension(axes, dimension, viz) {
-  const items = [];
+// Builds query params for Event Charts and Group Set Pivots
+function buildQueryParams(viz) {
+  const params = [];
+  const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
+
+  const dataDims = [];
   for (const axis of axes) {
-    if (axis.dimension === dimension && Array.isArray(axis.items)) {
-      for (const it of axis.items) if (it?.id) items.push(it.id);
+    const dimId = axis.id || axis.dimension;
+    if (!dimId || dimId === "pe" || dimId === "ou") continue;
+    if (axis.items && axis.items.length) {
+      for (const item of axis.items) {
+        if (item.id) dataDims.push(item.id);
+      }
+    } else {
+      dataDims.push(dimId);
     }
   }
-  return [...new Set(items)];
-}
+  for (const d of [...new Set(dataDims)]) params.push(`dimension=${d}`);
 
-function resolvePeriods(viz, axes) {
-  const fromItems = extractDimension(axes, "pe", viz);
-  if (fromItems.length) return fromItems.join(";");
+  const peItems = [];
   const rel = viz.relativePeriods || {};
-  const mapped = Object.keys(rel).filter(k => rel[k] && RELATIVE_PERIOD_MAP[k]).map(k => RELATIVE_PERIOD_MAP[k]);
-  if (mapped.length) return mapped.join(";");
-  return "THIS_YEAR";
-}
-
-function resolveOrgUnits(viz, axes) {
-  // explicit org units on the visualization
-  const explicit = (viz.organisationUnits || []).map(o => o.id).filter(Boolean);
-  if (explicit.length) return explicit.join(";");
-
-  // items on the `ou` axis (e.g. a specific district)
-  const fromItems = extractDimension(axes, "ou", viz);
-  if (fromItems.length) return fromItems.join(";");
-
-  // user-scoped flags
-  if (viz.userOrganisationUnit || viz.userOrganisationUnitChildren || viz.userOrganisationUnitGrandChildren) {
-    return "USER_ORGUNIT";
+  for (const [flag, pid] of Object.entries(RELATIVE_PERIOD_MAP)) {
+    if (rel[flag]) peItems.push(pid);
   }
-  return "USER_ORGUNIT";
-}
+  params.push(`dimension=pe:${peItems.length ? [...new Set(peItems)].join(";") : "LAST_12_MONTHS"}`);
 
-function allAxes(viz) {
-  return [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
-}
-
-async function buildAnalyticsQuery(viz, auth) {
-  const axes = allAxes(viz);
-  const dx = extractDimension(axes, "dx", viz);
-  const pe = resolvePeriods(viz, axes);
-  const ou = resolveOrgUnits(viz, axes);
-
-  if (!dx.length) return null;
-
-  // skip non-data viz (text, spacer, etc.)
-  if (!CHARTABLE_TYPES.has(viz.type) && !["PIVOT_TABLE", "SINGLE_VALUE"].includes(viz.type)) {
-    return null;
+  const ouItems = [];
+  if (viz.userOrganisationUnit) ouItems.push("USER_ORGUNIT");
+  if (viz.userOrganisationUnitChildren) ouItems.push("USER_ORGUNIT_CHILDREN");
+  if (viz.userOrganisationUnitGrandChildren) ouItems.push("USER_ORGUNIT_GRANDCHILDREN");
+  if (viz.organisationUnits && Array.isArray(viz.organisationUnits)) {
+    for (const ou of viz.organisationUnits) {
+      if (ou.id) ouItems.push(ou.id);
+    }
   }
+  params.push(`dimension=ou:${ouItems.length ? [...new Set(ouItems)].join(";") : "USER_ORGUNIT"}`);
 
-  const params = new URLSearchParams();
-  params.set("dimension", `dx:${dx.join(";")}`);
-  params.append("dimension", `pe:${pe}`);
-  params.append("dimension", `ou:${ou}`);
-  if (viz.program) params.set("program", viz.program.id || viz.program);
-  if (viz.programStage) params.set("stage", viz.programStage.id || viz.programStage);
+  return params;
+}
 
-  const url = `/api/analytics.json?${params.toString()}`;
-  const data = await dhisFetch(url, auth);
-
-  return {
-    id: viz.id,
-    name: viz.displayName,
-    type: viz.type,
-    query: url,
-    headers: data.headers || [],
-    rows: data.rows || [],
-    metaData: data.metaData || {},
+// Standard Aggregate Chart logic (dx + pe + ou)
+async function fetchStandardAnalytics(dims, auth) {
+  const buildUrl = dxItems => {
+    const params = [`dimension=dx:${dxItems.join(";")}`, `dimension=pe:${dims.pe.join(";")}`, `dimension=ou:${dims.ou.join(";")}`];
+    return `/api/analytics.json?${params.join("&")}`;
   };
+  try { return await dhisFetch(buildUrl(dims.dx), auth); } catch (err) { if (!err.message.includes("E7124") && !err.message.includes("E7102")) throw err; }
+  let lastErr;
+  for (const metric of ["REPORTING_RATE", "REPORTING_RATE_ON_TIME", "ACTUAL_REPORTS", "ACTUAL_REPORTS_ON_TIME", "EXPECTED_REPORTS"]) {
+    const dxWithMetric = dims.dx.map(id => id.includes(".") ? id : `${id}.${metric}`);
+    try { return await dhisFetch(buildUrl(dxWithMetric), auth); } catch (err) {
+      lastErr = err;
+      if (!err.message.includes("E7124") && !err.message.includes("E7102")) throw err;
+    }
+  }
+  throw lastErr;
 }
 
 export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
+  res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
+
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
+
   const { id } = req.query;
-  if (!id) return res.status(400).json({ error: "Missing dashboard id" });
+  if (!id) return res.status(400).json({ error: 'Missing dashboard "id" path parameter' });
+
   const auth = buildAuth(req);
 
   try {
-    const dash = await dhisFetch(
-      `/api/dashboards/${id}.json?fields=id,displayName,dashboardItems[id,type,visualization[id],chart[id],map[id],reportTable[id]]`,
-      auth
-    );
+    const dash = await dhisFetch(`/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`, auth);
+    
+    // Filter out MESSAGES completely
+    let rawItems = (dash.dashboardItems || []).filter(i => i.type !== "MESSAGES");
+    rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
-    const items = dash.dashboardItems || [];
-    const results = [];
-    const failures = [];
+    const items = [];
 
-    for (const item of items) {
-      const vizRef = item.visualization || item.chart || item.reportTable;
-      if (!vizRef?.id) continue;
+    for (let idx = 0; idx < rawItems.length; idx++) {
+      const item = rawItems[idx];
+      const base = {
+        index: idx,
+        type: item.type,
+        name: item.displayName || item.name || `${item.type} ${idx + 1}`,
+        position: { x: item.x, y: item.y, w: item.width, h: item.height },
+      };
+
+      // --- 1. SPECIAL WIDGETS ---
+      if (item.type === "TEXT") {
+        items.push({ ...base, text: item.text || "" });
+        continue;
+      }
+      if (item.type === "USERS") {
+        items.push({ ...base, users: item.users || [] });
+        continue;
+      }
+      if (item.type === "REPORTS") {
+        try {
+          const reportIds = item.reports.map(r => r.id).join(",");
+          const reportData = await dhisFetch(`/api/reports.json?filter=id:in:[${reportIds}]&fields=id,displayName`, auth);
+          items.push({ ...base, reports: reportData.reports || [] });
+        } catch (e) { console.warn("Failed to fetch reports", e.message); }
+        continue;
+      }
+      if (item.type === "APP") {
+        items.push({ ...base, appUrl: `${DHIS2_BASE}/dhis-web-apps/apps/${item.appKey}/index.html` });
+        continue;
+      }
+      if (item.type === "RESOURCES") {
+        try {
+          const resIds = item.resources.map(r => r.id).join(",");
+          const resData = await dhisFetch(`/api/documents.json?filter=id:in:[${resIds}]&fields=id,displayName`, auth);
+          items.push({ ...base, resources: resData.documents || [] });
+        } catch (e) { console.warn("Failed to fetch resources", e.message); }
+        continue;
+      }
+      if (item.type === "MAP") {
+        const mapId = item.map?.id || (typeof item.map === "string" ? item.map : null) || item.visualization?.id || null;
+        items.push({ ...base, mapId, mapLink: mapId ? `${DHIS2_BASE}/dhis-web-maps/#/${mapId}` : null });
+        continue;
+      }
+
+      // --- 2. VISUALIZATIONS (Standard, Event, Group Set) ---
+      let vizId = null;
+      if (item.type === "EVENT_CHART") vizId = item.eventChart?.id || item.eventVisualization?.id;
+      else if (item.type === "EVENT_REPORT") vizId = item.eventReport?.id || item.eventVisualization?.id;
+      else if (item.type === "EVENT_VISUALIZATION") vizId = item.eventVisualization?.id || item.visualization?.id;
+      else if (item.type === "VISUALIZATION") vizId = item.visualization?.id;
+
+      if (!vizId) continue;
 
       try {
-        // BUG FIX 1 in action: fetch with full `fields` so axes include items
-        const viz = await dhisFetch(`/api/visualizations/${vizRef.id}.json?fields=${VIZ_FIELDS}`, auth);
-        const result = await buildAnalyticsQuery(viz, auth);
-        if (result) results.push(result);
-        else failures.push({ id: vizRef.id, name: viz.displayName, reason: "unsupported type or no dx" });
+        let viz = null;
+        try {
+          viz = await dhisFetch(`/api/eventVisualizations/${encodeURIComponent(vizId)}.json`, auth);
+        } catch (e) {
+          viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json`, auth);
+        }
+
+        if (!viz) continue;
+
+        const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
+        const dxItems = axes.filter(a => (a.id || a.dimension) === "dx").flatMap(a => a.items || []);
+
+        let data = null;
+        let isPivotTable = viz.type === "PIVOT_TABLE";
+
+        // A. Event Charts / Reports
+        if (viz.program || viz.programStage) {
+          const programId = viz.program?.id || viz.program;
+          const stageId = viz.programStage?.id || viz.programStage;
+          if (programId) {
+            const params = buildQueryParams(viz);
+            if (stageId) params.push(`stage=${stageId}`);
+            data = await dhisFetch(`/api/analytics/events/aggregate/${programId}.json?${params.join("&")}`, auth);
+          }
+        }
+        // B. Group Set Pivot Tables (Disease)
+        else if (isPivotTable && dxItems.length === 0) {
+          const params = buildQueryParams(viz);
+          data = await dhisFetch(`/api/analytics.json?${params.join("&")}`, auth);
+        }
+        // C. Standard Charts (Delivery)
+        else {
+          if (dxItems.length > 0) {
+            const dims = { dx: dxItems, pe: [], ou: [] };
+            const rel = viz.relativePeriods || {};
+            for (const [flag, pid] of Object.entries(RELATIVE_PERIOD_MAP)) {
+              if (rel[flag]) dims.pe.push(pid);
+            }
+            if (viz.userOrganisationUnit) dims.ou.push("USER_ORGUNIT");
+            if (viz.userOrganisationUnitChildren) dims.ou.push("USER_ORGUNIT_CHILDREN");
+            if (viz.userOrganisationUnitGrandChildren) dims.ou.push("USER_ORGUNIT_GRANDCHILDREN");
+            
+            // Fallbacks for standard charts
+            if (!dims.pe.length) dims.pe.push("LAST_12_MONTHS");
+            if (!dims.ou.length) dims.ou.push("USER_ORGUNIT");
+
+            data = await fetchStandardAnalytics(dims, auth);
+          }
+        }
+
+        if (!data || !data.rows || !data.rows.length) {
+          items.push({ ...base, name: viz.displayName || base.name, skipped: true, reason: "No data items found" });
+          continue;
+        }
+
+        if (isPivotTable) {
+          items.push({
+            ...base,
+            name: viz.displayName || base.name,
+            vizType: "PIVOT_TABLE",
+            data: data,
+            layout: { columns: viz.columns || [], rows: viz.rows || [], filters: viz.filters || [] },
+          });
+        } else {
+          items.push({
+            ...base,
+            name: viz.displayName || base.name,
+            vizType: viz.type,
+            data: data
+          });
+        }
+
       } catch (err) {
-        failures.push({ id: vizRef.id, reason: err.message });
+        items.push({ ...base, name: base.name, error: err.message });
       }
     }
 
     res.status(200).json({
-      dashboard: { id: dash.id, name: dash.displayName },
-      total: items.length,
-      succeeded: results.length,
-      failed: failures.length,
-      visualizations: results,
-      failures,
+      dashboard: { id: dash.id, name: dash.displayName || dash.name || id, itemCount: items.length, loadedAt: new Date().toISOString() },
+      items,
     });
   } catch (err) {
+    console.error("[dashboard aggregator]", err);
     res.status(500).json({ error: err.message });
   }
 }
