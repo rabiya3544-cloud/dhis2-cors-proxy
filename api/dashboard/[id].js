@@ -172,42 +172,43 @@ export default async function handler(req, res) {
     const rawItems = dash.dashboardItems || [];
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
-    // --- FETCH ALL MESSAGES ---
+    // --- FETCH MESSAGES (INTERPRETATIONS) ---
     let dashboardMessages = [];
-    let rawMessages = []; 
+    let rawMessages = [];
     
-    try {
-      // 1. Fetch up to 500 messages, asking for ALL possible link types (visualization, map, eventReport, etc.)
-      const interpUrl = `/api/interpretations.json?pageSize=500&fields=id,text,type,visualization[id],map[id],eventReport[id],eventChart[id],eventVisualization[id],user[displayName]`;
-      const interpData = await dhisFetch(interpUrl, auth);
-      const allInterps = interpData.interpretations || [];
-      rawMessages = allInterps;
+    if (rawItems.some(i => i.type === "MESSAGES")) {
+      try {
+        // 1. Fetch all interpretations, explicitly asking for every possible link type
+        const interpUrl = `/api/interpretations.json?pageSize=500&fields=id,text,created,user[displayName],comments[text,created,user[displayName]],visualization[id],map[id],eventVisualization[id],eventReport[id],eventChart[id]`;
+        const interpData = await dhisFetch(interpUrl, auth);
+        rawMessages = interpData.interpretations || [];
 
-      // 2. Extract ALL possible object IDs from the dashboard items
-      const objectIds = rawItems
-        .map(i => 
-          i.visualization?.id || i.map?.id || i.eventReport?.id || 
-          i.eventChart?.id || i.eventVisualization?.id ||
-          (typeof i.visualization === "string" ? i.visualization : null) ||
-          (typeof i.map === "string" ? i.map : null)
-        )
-        .filter(id => typeof id === "string");
+        // 2. Extract every possible object ID from the dashboard items (including event charts, maps, etc.)
+        const objectIds = rawItems
+          .map(i => 
+            i.visualization?.id || i.map?.id || 
+            i.eventVisualization?.id || i.eventReport?.id || i.eventChart?.id ||
+            (typeof i.visualization === "string" ? i.visualization : null) ||
+            (typeof i.map === "string" ? i.map : null) ||
+            (typeof i.eventVisualization === "string" ? i.eventVisualization : null)
+          )
+          .filter(id => typeof id === "string");
 
-      // 3. Match the messages against ANY of those IDs
-      dashboardMessages = allInterps.filter(interp => {
-        const linkedIds = [
-          interp.visualization?.id,
-          interp.map?.id,
-          interp.eventReport?.id,
-          interp.eventChart?.id,
-          interp.eventVisualization?.id
-        ].filter(Boolean);
-        
-        return linkedIds.some(linkId => objectIds.includes(linkId));
-      });
-      
-    } catch (e) {
-      console.warn("Could not fetch interpretations:", e.message);
+        // 3. Match messages against ANY link type
+        dashboardMessages = rawMessages.filter(interp => {
+          const linkedId = 
+            interp.visualization?.id || 
+            interp.map?.id || 
+            interp.eventVisualization?.id || 
+            interp.eventReport?.id || 
+            interp.eventChart?.id;
+            
+          return linkedId && objectIds.includes(linkedId);
+        });
+
+      } catch (e) {
+        console.warn("Could not fetch interpretations:", e.message);
+      }
     }
 
     const items = await pMap(
@@ -222,7 +223,7 @@ export default async function handler(req, res) {
 
         if (item.type === "TEXT") return { ...base, text: item.text || "" };
         
-        // Pass BOTH filtered messages and raw messages to frontend
+        // Send both filtered and raw messages for debugging/rendering
         if (item.type === "MESSAGES") return { ...base, messages: dashboardMessages, rawMessages: rawMessages };
 
         if (item.type === "MAP") {
@@ -230,9 +231,14 @@ export default async function handler(req, res) {
           return { ...base, mapId, mapLink: mapId ? `${DHIS2_BASE}/dhis-web-maps/#/${mapId}` : null };
         }
 
-        if (item.type !== "VISUALIZATION") return { ...base, skipped: true, reason: `${item.type} not supported` };
+        if (item.type !== "VISUALIZATION" && item.type !== "EVENT_VISUALIZATION") {
+          return { ...base, skipped: true, reason: `${item.type} not supported` };
+        }
 
-        const vizId = typeof item.visualization === "string" ? item.visualization : item.visualization?.id;
+        const vizId = 
+          (typeof item.visualization === "string" ? item.visualization : item.visualization?.id) ||
+          (typeof item.eventVisualization === "string" ? item.eventVisualization : item.eventVisualization?.id);
+          
         if (!vizId) return { ...base, error: "No visualization linked to this item." };
 
         try {
@@ -270,9 +276,6 @@ export default async function handler(req, res) {
       },
       5
     );
-
-    // Removed the synthetic injection. We rely purely on DHIS2's dashboardItems array.
-    // If DHIS2 sends a MESSAGES item, we build the card. If not, we don't.
 
     res.status(200).json({
       dashboard: { id: dash.id, name: dash.displayName || dash.name || id, itemCount: items.length, loadedAt: new Date().toISOString() },
