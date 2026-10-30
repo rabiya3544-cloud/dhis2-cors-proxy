@@ -1,4 +1,3 @@
-// api/proxy.js
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
@@ -22,11 +21,8 @@ export default async function handler(req, res) {
     delete headersToForward.referer;
     delete headersToForward['accept-encoding'];
     delete headersToForward['content-length'];
-
-    // Add a user-agent just in case DHIS2 is blocking empty UAs
     headersToForward['user-agent'] = headersToForward['user-agent'] || 'Vercel-Proxy';
 
-    // Create a timeout controller (8.5 seconds to stay under Vercel's 10s limit)
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8500);
 
@@ -41,14 +37,21 @@ export default async function handler(req, res) {
     clearTimeout(timeoutId);
 
     res.status(response.status);
+    
     const contentType = response.headers.get('content-type');
     if (contentType) {
       res.setHeader('Content-Type', contentType);
     }
 
+    // 👇 ADD THIS BLOCK RIGHT HERE 👇
+    // If DHIS2 returned a successful response (200 OK), tell Vercel to cache it
+    if (response.ok) {
+      res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
+    }
+    // 👆 END OF BLOCK 👆
+
     const body = await response.arrayBuffer();
     
-    // If DHIS2 returned an empty body for some reason, send a JSON warning
     if (body.byteLength === 0) {
       return res.status(204).end(); 
     }
@@ -58,7 +61,6 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error('Proxy error:', error);
     
-    // Handle the timeout explicitly
     if (error.name === 'AbortError') {
       return res.status(504).json({ 
         error: 'Gateway Timeout', 
