@@ -15,7 +15,7 @@ const RELATIVE_PERIOD_MAP = {
 
 const CHARTABLE_TYPES = new Set([
   "LINE", "AREA", "STACKED_AREA", "YEAR_OVER_YEAR_LINE", "COLUMN", "BAR", "STACKED_COLUMN", "STACKED_BAR", "YEAR_OVER_YEAR_COLUMN",
-  "PIE", "RADAR", "GAUGE", "SCATTER", "BUBBLE", "PIVOT_TABLE"
+  "PIE", "RADAR", "GAUGE", "SCATTER", "BUBBLE",
 ]);
 
 const REPORTING_METRICS = ["REPORTING_RATE", "REPORTING_RATE_ON_TIME", "ACTUAL_REPORTS", "ACTUAL_REPORTS_ON_TIME", "EXPECTED_REPORTS"];
@@ -45,21 +45,22 @@ async function fetchVizAndDims(vizId, auth) {
   let viz = null;
   let isEventType = false;
 
-  // 🛠️ Try standard visualization first
+  // 1. Try standard visualization endpoint
   try {
     viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json`, auth);
   } catch (e) {}
 
-  // 🛠️ If it has no program, it's likely an Event visualization. Try all Event endpoints.
+  // 2. If standard failed OR it's missing program/stage, try Event endpoints
   if (!viz || (!viz.program && !viz.programStage)) {
     const endpoints = ["eventVisualizations", "eventCharts", "eventReports"];
     for (const ep of endpoints) {
       try {
         const ev = await dhisFetch(`/api/${ep}/${encodeURIComponent(vizId)}.json`, auth);
-        if (ev) {
+        // 🛠️ CRITICAL FIX: ONLY overwrite if it actually contains Event definition data!
+        if (ev && (ev.program || ev.programStage)) {
           viz = ev;
           isEventType = true;
-          break; // Found the event data
+          break;
         }
       } catch (e) {}
     }
@@ -222,7 +223,6 @@ export default async function handler(req, res) {
         try {
           const { viz, dims, isEventType } = await fetchVizAndDims(vizId, auth);
           
-          // Force Event detection if the API flagged it or if we know it's an Event Type
           const isEvent = isEventType || !!(viz.program || viz.programStage) || viz.type === "EVENT_VISUALIZATION" || viz.type === "EVENT_CHART" || viz.type === "EVENT_REPORT";
           const isPivotTable = viz.type === "PIVOT_TABLE";
           const isChartable  = CHARTABLE_TYPES.has(viz.type);
