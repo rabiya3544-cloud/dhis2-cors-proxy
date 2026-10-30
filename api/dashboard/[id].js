@@ -181,32 +181,19 @@ export default async function handler(req, res) {
       const interpData = await dhisFetch(interpUrl, auth);
       rawMessages = interpData.interpretations || [];
 
-      // 🛠️ THE FIX: Extract EVERY possible ID from the dashboard items, including item.id
-      const objectIds = rawItems
-        .flatMap(i => [
-          i.id, // <--- This was the missing piece for EVENT_VISUALIZATION
-          i.visualization?.id,
-          i.map?.id,
-          i.eventVisualization?.id,
-          i.eventReport?.id,
-          i.eventChart?.id,
-          (typeof i.visualization === "string" ? i.visualization : null),
-          (typeof i.map === "string" ? i.map : null),
-          (typeof i.eventVisualization === "string" ? i.eventVisualization : null)
-        ])
-        .filter(id => typeof id === "string");
+      // 🛠️ BRUTE-FORCE FIX: Stringify the dashboard items. 
+      // If the ID appears ANYWHERE in the JSON, it belongs to this dashboard.
+      const dashItemsString = JSON.stringify(rawItems);
 
-      // Match against ALL link types
       dashboardMessages = rawMessages.filter(interp => {
-        const linkedIds = [
-          interp.visualization?.id,
-          interp.map?.id,
-          interp.eventVisualization?.id,
-          interp.eventReport?.id,
-          interp.eventChart?.id
-        ].filter(Boolean);
-        
-        return linkedIds.some(linkId => objectIds.includes(linkId));
+        const linkedId = 
+          interp.visualization?.id || 
+          interp.map?.id || 
+          interp.eventVisualization?.id || 
+          interp.eventReport?.id || 
+          interp.eventChart?.id;
+          
+        return linkedId && dashItemsString.includes(linkedId);
       });
 
     } catch (e) {
@@ -238,7 +225,7 @@ export default async function handler(req, res) {
         const vizId = 
           (typeof item.visualization === "string" ? item.visualization : item.visualization?.id) ||
           (typeof item.eventVisualization === "string" ? item.eventVisualization : item.eventVisualization?.id) ||
-          item.id; // Fallback to item.id
+          item.id; // Fallback to primary ID
           
         if (!vizId) return { ...base, error: "No visualization linked to this item." };
 
@@ -279,8 +266,7 @@ export default async function handler(req, res) {
     );
 
     // 🛠️ INJECT MESSAGES CARD IF MISSING
-    // If DHIS2's dashboard payload does not include a MESSAGES widget, but we found messages,
-    // we create one here so the frontend renders it.
+    // If DHIS2 didn't send a MESSAGES widget, but we found messages, we inject it here.
     if (dashboardMessages.length > 0 && !items.some(i => i.type === "MESSAGES")) {
       items.push({
         index: items.length,
