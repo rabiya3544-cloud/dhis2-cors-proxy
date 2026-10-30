@@ -26,7 +26,7 @@ async function dhisFetch(path, auth) {
   return res.json();
 }
 
-// Unified parameter builder for both Event charts and Group Set pivots
+// Shared parameter builder for both Event Charts and Group Set Pivots
 function buildQueryParams(viz) {
   const params = [];
   const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
@@ -69,7 +69,20 @@ function buildQueryParams(viz) {
   }
   params.push(`dimension=ou:${ouItems.length ? [...new Set(ouItems)].join(";") : "USER_ORGUNIT"}`);
 
-  return params.join("&");
+  return params;
+}
+
+async function fetchEventAnalytics(viz, auth) {
+  const programId = viz.program?.id || viz.program;
+  const stageId = viz.programStage?.id || viz.programStage;
+  
+  if (!programId) throw new Error("Event visualization missing program ID.");
+
+  const params = buildQueryParams(viz);
+  if (stageId) params.push(`stage=${stageId}`);
+
+  const url = `/api/analytics/events/aggregate/${programId}.json?${params.join("&")}`;
+  return await dhisFetch(url, auth);
 }
 
 export default async function handler(req, res) {
@@ -96,6 +109,7 @@ export default async function handler(req, res) {
     for (const item of rawItems) {
       let vizId = null;
 
+      // Identify IDs based on type
       if (item.type === "EVENT_CHART") {
         vizId = item.eventChart?.id || item.eventVisualization?.id;
       } else if (item.type === "EVENT_REPORT") {
@@ -109,12 +123,13 @@ export default async function handler(req, res) {
       if (!vizId) continue;
 
       try {
-        // 1. Try eventVisualizations first (since both Disease and Inpatient use this)
         let viz = null;
+        
+        // Fetch full definition. Try eventVisualizations first (handles both Event Charts and Group Sets)
         try {
           viz = await dhisFetch(`/api/eventVisualizations/${encodeURIComponent(vizId)}.json`, auth);
         } catch (e) {
-          // Fallback to standard visualizations (Disease chart might live here)
+          // Fallback to standard visualizations
           viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json`, auth);
         }
 
@@ -125,21 +140,17 @@ export default async function handler(req, res) {
 
         let data = null;
 
-        // --- CASE A: Group Set Pivot Table (Disease) ---
         if (viz.type === "PIVOT_TABLE" && dxItems.length === 0) {
+          // CASE A: Group Set Pivot Table (Disease Surveillance)
           const params = buildQueryParams(viz);
-          data = await dhisFetch(`/api/analytics.json?${params}`, auth);
+          data = await dhisFetch(`/api/analytics.json?${params.join("&")}`, auth);
         } 
-        // --- CASE B: Event Chart / Report (Inpatient) ---
         else if (viz.program || viz.programStage) {
-          let stageId = viz.programStage?.id || viz.programStage || viz.program?.id || viz.program;
-          if (!stageId) throw new Error("Missing program/stage ID");
-          
-          const params = buildQueryParams(viz);
-          data = await dhisFetch(`/api/analytics/events/aggregate/${stageId}.json?${params}`, auth);
+          // CASE B: Event Chart / Event Report (Inpatient Discharge)
+          data = await fetchEventAnalytics(viz, auth);
         } 
         else {
-          continue; // Skip standard charts
+          continue; // Skip standard charts (handled by main endpoint)
         }
 
         if (!data || !data.rows || !data.rows.length) {
