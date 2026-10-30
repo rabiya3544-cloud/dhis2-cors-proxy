@@ -26,7 +26,6 @@ async function dhisFetch(path, auth) {
   return res.json();
 }
 
-// Shared parameter builder for both Event Charts and Group Set Pivots
 function buildQueryParams(viz) {
   const params = [];
   const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
@@ -45,7 +44,6 @@ function buildQueryParams(viz) {
   }
   for (const d of [...new Set(dataDims)]) params.push(`dimension=${d}`);
 
-  // Periods
   const peItems = [];
   const rel = viz.relativePeriods || {};
   for (const [flag, pid] of Object.entries(RELATIVE_PERIOD_MAP)) {
@@ -53,7 +51,6 @@ function buildQueryParams(viz) {
   }
   params.push(`dimension=pe:${peItems.length ? [...new Set(peItems)].join(";") : "LAST_12_MONTHS"}`);
 
-  // Org Units
   const ouItems = [];
   if (viz.userOrganisationUnit) ouItems.push("USER_ORGUNIT");
   if (viz.userOrganisationUnitChildren) ouItems.push("USER_ORGUNIT_CHILDREN");
@@ -131,14 +128,15 @@ export default async function handler(req, res) {
 
         let data = null;
 
-        if (viz.type === "PIVOT_TABLE" && dxItems.length === 0) {
-          // CASE A: Group Set Pivot Table (Disease Surveillance)
+        // 🛠️ FIX: Check for program/stage FIRST, before checking for PIVOT_TABLE
+        if (viz.program || viz.programStage) {
+          // CASE A: Event Report, Event Chart, or Event Visualization
+          data = await fetchEventAnalytics(viz, auth);
+        } 
+        else if (viz.type === "PIVOT_TABLE" && dxItems.length === 0) {
+          // CASE B: Group Set Pivot Table (Disease Surveillance)
           const params = buildQueryParams(viz);
           data = await dhisFetch(`/api/analytics.json?${params.join("&")}`, auth);
-        } 
-        else if (viz.program || viz.programStage) {
-          // CASE B: Event Chart / Event Report (Inpatient Discharge)
-          data = await fetchEventAnalytics(viz, auth);
         } 
         else {
           continue; // Skip standard charts
@@ -150,9 +148,7 @@ export default async function handler(req, res) {
         }
 
         eventItems.push({
-          // 🛠️ FIX: Add type so the frontend renders it.
-          // 'vizType' dictates whether it draws a Chart (AREA, LINE) or Table (PIVOT_TABLE).
-          type: "VISUALIZATION",
+          type: "VISUALIZATION", // Frontend uses vizType to determine if it's a table or chart
           id: vizId,
           name: viz.displayName || item.displayName || "Chart",
           vizType: viz.type,
