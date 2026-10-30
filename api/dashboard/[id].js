@@ -176,7 +176,10 @@ export default async function handler(req, res) {
     let dashboardMessages = [];
     if (rawItems.some(i => i.type === "MESSAGES")) {
       try {
-        const interpData = await dhisFetch(`/api/interpretations.json?filter=type:eq:DASHBOARD&filter=id:eq:${id}&fields=id,text,created,user[displayName],comments[text,created,user[displayName]]&paging=false`, auth);
+        const interpData = await dhisFetch(
+          `/api/interpretations.json?filter=object.id:eq:${id}&fields=id,text,created,user[displayName],comments[text,created,user[displayName]]&paging=false`, 
+          auth
+        );
         dashboardMessages = interpData.interpretations || [];
       } catch (e) {
         console.warn("Could not fetch interpretations:", e.message);
