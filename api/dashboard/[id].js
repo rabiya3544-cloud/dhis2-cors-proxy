@@ -174,20 +174,22 @@ export default async function handler(req, res) {
 
     // --- FETCH MESSAGES (INTERPRETATIONS) ---
     let dashboardMessages = [];
+    let rawMessages = []; // <-- NEW: Store all messages for console.log
+    
     if (rawItems.some(i => i.type === "MESSAGES")) {
       try {
-        // The EXACT endpoint that worked in your JSON viewer
         const interpUrl = `/api/interpretations.json?pageSize=100&fields=id,text,type,visualization[id,displayName],user[displayName]`;
         const interpData = await dhisFetch(interpUrl, auth);
         const allInterps = interpData.interpretations || [];
         
-        // Get all Visualization IDs present on this dashboard
+        rawMessages = allInterps; // <-- NEW: Save unfiltered list
+
+        // KEEP FILTERING LOGIC
         const vizIds = rawItems
           .filter(i => i.type === "VISUALIZATION")
           .map(i => i.visualization?.id || i.visualization)
           .filter(id => typeof id === "string");
 
-        // Match them up
         dashboardMessages = allInterps.filter(interp => 
           interp.visualization && vizIds.includes(interp.visualization.id)
         );
@@ -208,7 +210,9 @@ export default async function handler(req, res) {
         };
 
         if (item.type === "TEXT") return { ...base, text: item.text || "" };
-        if (item.type === "MESSAGES") return { ...base, messages: dashboardMessages };
+        
+        // <-- NEW: Pass rawMessages to the frontend as well
+        if (item.type === "MESSAGES") return { ...base, messages: dashboardMessages, rawMessages: rawMessages };
 
         if (item.type === "MAP") {
           const mapId = item.map?.id || (typeof item.map === "string" ? item.map : null) || item.visualization?.id || null;
