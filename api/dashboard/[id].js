@@ -47,7 +47,20 @@ async function fetchVizAndDims(vizId, auth) {
     "relativePeriods", "userOrganisationUnit", "userOrganisationUnitChildren", "userOrganisationUnitGrandChildren", 
     "program", "programStage", "value"
   ].join(",");
-  const viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth);
+
+  let viz = null;
+  try {
+    viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth);
+  } catch (e) {}
+
+  if (!viz || (!viz.program && !viz.programStage)) {
+    try {
+      const ev = await dhisFetch(`/api/eventVisualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth);
+      if (ev) viz = ev;
+    } catch (e) {
+      if (!viz) throw new Error(`Failed to fetch visualization ${vizId}`);
+    }
+  }
   
   const dims = { dx: [], pe: [], ou: [] };
   const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
@@ -170,7 +183,6 @@ export default async function handler(req, res) {
   try {
     const dash = await dhisFetch(`/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`, auth);
     
-    // 🛠️ FILTER OUT MESSAGES COMPLETELY
     let rawItems = (dash.dashboardItems || []).filter(i => i.type !== "MESSAGES");
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
