@@ -168,22 +168,12 @@ export default async function handler(req, res) {
   const auth = buildAuth(req);
 
   try {
-    const dash = await dhisFetch(`/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`, auth);
+    const dash = await dhisFetch(`/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all],messages[id,text,created,user[displayName],comments[text,created,user[displayName]]]`, auth);
     const rawItems = dash.dashboardItems || [];
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
-    let dashboardMessages = [];
-    if (rawItems.some(i => i.type === "MESSAGES")) {
-      try {
-        const interpData = await dhisFetch(
-          `/api/interpretations.json?filter=object.id:eq:${id}&fields=id,text,created,user[displayName],comments[text,created,user[displayName]]&paging=false`, 
-          auth
-        );
-        dashboardMessages = interpData.interpretations || [];
-      } catch (e) {
-        console.warn("Could not fetch interpretations:", e.message);
-      }
-    }
+    // Messages are already included in the dashboard object
+    const dashboardMessages = dash.messages || [];
 
     const items = await pMap(
       rawItems,
