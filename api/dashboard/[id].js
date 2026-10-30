@@ -44,7 +44,8 @@ function isMissingTableError(err) { return /42P01|referenced table does not exis
 async function fetchVizAndDims(vizId, auth) {
   const fields = [
     "id", "displayName", "type", "columns[dimension,items[id]]", "rows[dimension,items[id]]", "filters[dimension,items[id]]",
-    "relativePeriods", "userOrganisationUnit", "userOrganisationUnitChildren", "userOrganisationUnitGrandChildren", "program", "programStage"
+    "relativePeriods", "userOrganisationUnit", "userOrganisationUnitChildren", "userOrganisationUnitGrandChildren", 
+    "program", "programStage", "value"
   ].join(",");
   const viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth);
   
@@ -92,10 +93,63 @@ async function fetchAnalytics(dims, auth) {
   throw lastErr;
 }
 
+async function fetchEventAnalytics(viz, auth) {
+  let stageId = null;
+  if (viz.programStage) stageId = typeof viz.programStage === 'string' ? viz.programStage : viz.programStage.id;
+  else if (viz.program) stageId = typeof viz.program === 'string' ? viz.program : viz.program.id;
+  if (!stageId) throw new Error("Event visualization missing program or stage ID.");
+
+  const params = [];
+  const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
+  
+  let peItems = [];
+  let ouItems = [];
+  
+  for (const axis of axes) {
+    if (axis.dimension === "pe") {
+      if (axis.items && axis.items.length) peItems = axis.items.map(i => i.id);
+    } else if (axis.dimension === "ou") {
+      if (axis.items && axis.items.length) ouItems = axis.items.map(i => i.id);
+    } else {
+      if (axis.items && axis.items.length) {
+        params.push(`dimension=${axis.dimension}:${axis.items.map(i => i.id).join(";")}`);
+      } else {
+        params.push(`dimension=${axis.dimension}`);
+      }
+    }
+  }
+  
+  const rel = viz.relativePeriods || {};
+  for (const [flag, pid] of Object.entries(RELATIVE_PERIOD_MAP)) {
+    if (rel[flag]) peItems.push(pid);
+  }
+  if (viz.userOrganisationUnit) ouItems.push("USER_ORGUNIT");
+  if (viz.userOrganisationUnitChildren) ouItems.push("USER_ORGUNIT_CHILDREN");
+  if (viz.userOrganisationUnitGrandChildren) ouItems.push("USER_ORGUNIT_GRANDCHILDREN");
+  
+  if (peItems.length) params.push(`dimension=pe:${[...new Set(peItems)].join(";")}`);
+  else params.push(`dimension=pe:LAST_12_MONTHS`);
+  
+  if (ouItems.length) params.push(`dimension=ou:${[...new Set(ouItems)].join(";")}`);
+  else params.push(`dimension=ou:USER_ORGUNIT`);
+
+  if (viz.value && viz.value.id) params.push(`value=${viz.value.id}`);
+  else if (viz.value) params.push(`value=${viz.value}`);
+
+  const url = `/api/analytics/events/aggregate/${stageId}.json?${params.join("&")}`;
+  return await dhisFetch(url, auth);
+}
+
 async function pMap(items, fn, concurrency = 5) {
-  const results = new Array(items.length); let i = 0;
-  const worker = async () => { while (i < items.length) { const idx = i++; results[idx] = await fn(items[idx], idx); } };
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  const results = new Array(items.length);
+  let i = 0;
+  const worker = async () => {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
   return results;
 }
 
@@ -118,6 +172,17 @@ export default async function handler(req, res) {
     const rawItems = dash.dashboardItems || [];
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
+    // Fetch interpretations for MESSAGES if they exist
+    let dashboardMessages = [];
+    if (rawItems.some(i => i.type === "MESSAGES")) {
+      try {
+        const interpData = await dhisFetch(`/api/interpretations.json?filter=dashboard.id:eq:${id}&fields=id,text,created,user[displayName],comments[text,created,user[displayName]]&paging=false`, auth);
+        dashboardMessages = interpData.interpretations || [];
+      } catch (e) {
+        console.warn("Could not fetch interpretations:", e.message);
+      }
+    }
+
     const items = await pMap(
       rawItems,
       async (item, idx) => {
@@ -128,13 +193,10 @@ export default async function handler(req, res) {
           position: { x: item.x, y: item.y, w: item.w, h: item.h },
         };
 
-        if (item.type === "TEXT") {
-          return { ...base, text: item.text || "" };
-        }
+        if (item.type === "TEXT") return { ...base, text: item.text || "" };
 
-        // --- NEW: Handle MESSAGES ---
         if (item.type === "MESSAGES") {
-          return { ...base, messages: item.messages || [] };
+          return { ...base, messages: dashboardMessages };
         }
 
         if (item.type === "MAP") {
@@ -151,26 +213,21 @@ export default async function handler(req, res) {
 
         try {
           const { viz, dims } = await fetchVizAndDims(vizId, auth);
-          
-          // --- NEW: Correctly identify Event Pivot Tables ---
-          if (!dims.dx.length) {
-            const isEvent = viz.program || viz.programStage;
-            return { 
-              ...base, 
-              name: viz.displayName || base.name, 
-              skipped: true, 
-              reason: isEvent ? "Event/Tracker Pivot Table (requires event API)" : "No data items found" 
-            };
-          }
-
+          const isEvent = !!(viz.program || viz.programStage);
           const isPivotTable = viz.type === "PIVOT_TABLE";
           const isChartable  = CHARTABLE_TYPES.has(viz.type);
 
-          if (!isPivotTable && !isChartable) {
+          if (!isPivotTable && !isChartable && !isEvent) {
             return { ...base, name: viz.displayName || base.name, skipped: true, reason: `${viz.type} not supported` };
           }
 
-          const data = await fetchAnalytics(dims, auth);
+          let data;
+          if (isEvent) {
+            data = await fetchEventAnalytics(viz, auth);
+          } else {
+            if (!dims.dx.length) return { ...base, name: viz.displayName || base.name, skipped: true, reason: "No data items found" };
+            data = await fetchAnalytics(dims, auth);
+          }
 
           if (isPivotTable) {
             return {
@@ -186,7 +243,7 @@ export default async function handler(req, res) {
 
         } catch (err) {
           if (isMissingTableError(err)) {
-            return { ...base, error: "Data unavailable: The server's analytics tables for this specific chart are currently being rebuilt." };
+            return { ...base, error: "Data unavailable: Analytics tables are currently being rebuilt." };
           }
           return { ...base, error: err.message };
         }
