@@ -99,7 +99,18 @@ export default async function handler(req, res) {
     const debug = [];
 
     for (const item of rawItems) {
-     // 🛠️ Handle REPORTS
+     // 🛠️ Handle USERS
+      if (item.type === "USERS") {
+        eventItems.push({
+          type: "USERS",
+          id: item.id,
+          name: item.displayName || "Users",
+          users: item.users || [],
+          position: { x: item.x, y: item.y, w: item.width, h: item.height }
+        });
+        continue;
+      }
+      // 🛠️ Handle REPORTS
       if (item.type === "REPORTS") {
         try {
           const reportIds = item.reports.map(r => r.id).join(",");
