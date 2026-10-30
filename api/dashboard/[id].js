@@ -172,7 +172,6 @@ export default async function handler(req, res) {
     const rawItems = dash.dashboardItems || [];
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
-    // Fetch interpretations for MESSAGES if they exist
     let dashboardMessages = [];
     if (rawItems.some(i => i.type === "MESSAGES")) {
       try {
