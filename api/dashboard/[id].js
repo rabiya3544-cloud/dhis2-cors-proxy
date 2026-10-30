@@ -176,11 +176,24 @@ export default async function handler(req, res) {
     let dashboardMessages = [];
     let rawMessages = [];
     let matchDebug = [];
+    let dashboardItemIds = []; // <-- NEW: Shows what charts are actually on the dashboard
     
     try {
       const interpUrl = `/api/interpretations.json?pageSize=500&fields=id,text,created,user[displayName],comments[text,created,user[displayName]],visualization[id],map[id],eventVisualization[id],eventReport[id],eventChart[id]`;
       const interpData = await dhisFetch(interpUrl, auth);
       rawMessages = interpData.interpretations || [];
+
+      // 1. Populate dashboardItemIds for debugging
+      dashboardItemIds = rawItems.map(i => {
+        const linkedId = 
+          i.visualization?.id || 
+          i.map?.id || 
+          i.eventVisualization?.id || 
+          i.eventReport?.id || 
+          i.eventChart?.id || 
+          "NO_LINKED_ID";
+        return `${i.type} (itemId: ${i.id}) -> LinkedId: ${linkedId}`;
+      });
 
       const dashItemsString = JSON.stringify(rawItems);
 
@@ -219,7 +232,7 @@ export default async function handler(req, res) {
 
         if (item.type === "TEXT") return { ...base, text: item.text || "" };
         
-        if (item.type === "MESSAGES") return { ...base, messages: dashboardMessages, rawMessages: rawMessages, matchDebug: matchDebug };
+        if (item.type === "MESSAGES") return { ...base, messages: dashboardMessages, rawMessages: rawMessages, matchDebug: matchDebug, dashboardItemIds: dashboardItemIds };
 
         if (item.type === "MAP") {
           const mapId = item.map?.id || (typeof item.map === "string" ? item.map : null) || item.visualization?.id || null;
@@ -281,7 +294,8 @@ export default async function handler(req, res) {
         position: { x: 0, y: 0, w: 0, h: 0 },
         messages: dashboardMessages,
         rawMessages: rawMessages,
-        matchDebug: matchDebug
+        matchDebug: matchDebug,
+        dashboardItemIds: dashboardItemIds
       });
     }
 
