@@ -99,6 +99,25 @@ export default async function handler(req, res) {
     const debug = [];
 
     for (const item of rawItems) {
+     // 🛠️ Handle REPORTS
+      if (item.type === "REPORTS") {
+        try {
+          const reportIds = item.reports.map(r => r.id).join(",");
+          const reportData = await dhisFetch(`/api/reports.json?filter=id:in:[${reportIds}]&fields=id,displayName`, auth);
+          const reports = reportData.reports || [];
+          
+          eventItems.push({
+            type: "REPORTS",
+            id: item.id,
+            name: item.displayName || "Reports",
+            reports: reports,
+            position: { x: item.x, y: item.y, w: item.width, h: item.height }
+          });
+        } catch (e) {
+          debug.push(`Failed to fetch reports for ${item.id}: ${e.message}`);
+        }
+        continue;
+      }
       // 🛠️ NEW: Handle APP items
       if (item.type === "APP") {
         eventItems.push({
