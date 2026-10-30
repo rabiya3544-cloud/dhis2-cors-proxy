@@ -1,5 +1,5 @@
 // api/dashboard/[id].js
-const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/stable-2-43-2-1";
+const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/dev";
 const DEFAULT_AUTH = process.env.DHIS2_AUTH || "Basic " + Buffer.from("admin:district").toString("base64");
 
 const RELATIVE_PERIOD_MAP = {
@@ -168,12 +168,20 @@ export default async function handler(req, res) {
   const auth = buildAuth(req);
 
   try {
-    const dash = await dhisFetch(`/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all],messages[id,text,created,user[displayName],comments[text,created,user[displayName]]]`, auth);
+    const dash = await dhisFetch(`/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`, auth);
     const rawItems = dash.dashboardItems || [];
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
-    // Messages are already included in the dashboard object
-    const dashboardMessages = dash.messages || [];
+    // Fetch interpretations specifically for this dashboard
+    let dashboardMessages = [];
+    if (rawItems.some(i => i.type === "MESSAGES")) {
+      try {
+        const interpData = await dhisFetch(`/api/interpretations.json?filter=type:eq:DASHBOARD&filter=object.id:eq:${id}&fields=id,text,created,user[displayName],comments[text,created,user[displayName]]&paging=false`, auth);
+        dashboardMessages = interpData.interpretations || [];
+      } catch (e) {
+        console.warn("Could not fetch interpretations:", e.message);
+      }
+    }
 
     const items = await pMap(
       rawItems,
@@ -186,19 +194,14 @@ export default async function handler(req, res) {
         };
 
         if (item.type === "TEXT") return { ...base, text: item.text || "" };
-
-        if (item.type === "MESSAGES") {
-          return { ...base, messages: dashboardMessages };
-        }
+        if (item.type === "MESSAGES") return { ...base, messages: dashboardMessages };
 
         if (item.type === "MAP") {
           const mapId = item.map?.id || (typeof item.map === "string" ? item.map : null) || item.visualization?.id || null;
           return { ...base, mapId, mapLink: mapId ? `${DHIS2_BASE}/dhis-web-maps/#/${mapId}` : null };
         }
 
-        if (item.type !== "VISUALIZATION") {
-          return { ...base, skipped: true, reason: `${item.type} not supported` };
-        }
+        if (item.type !== "VISUALIZATION") return { ...base, skipped: true, reason: `${item.type} not supported` };
 
         const vizId = typeof item.visualization === "string" ? item.visualization : item.visualization?.id;
         if (!vizId) return { ...base, error: "No visualization linked to this item." };
@@ -230,13 +233,9 @@ export default async function handler(req, res) {
               layout: { columns: viz.columns || [], rows: viz.rows || [], filters: viz.filters || [] },
             };
           }
-
           return { ...base, name: viz.displayName || base.name, vizType: viz.type, data };
-
         } catch (err) {
-          if (isMissingTableError(err)) {
-            return { ...base, error: "Data unavailable: Analytics tables are currently being rebuilt." };
-          }
+          if (isMissingTableError(err)) return { ...base, error: "Data unavailable: Analytics tables are rebuilding." };
           return { ...base, error: err.message };
         }
       },
