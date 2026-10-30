@@ -1,6 +1,4 @@
 // api/events/[id].js
-// A dedicated endpoint ONLY for Event Visualizations, leaving standard charts untouched.
-
 const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/stable-2-43-2-1";
 const DEFAULT_AUTH = process.env.DHIS2_AUTH || "Basic " + Buffer.from("admin:district").toString("base64");
 
@@ -28,57 +26,11 @@ async function dhisFetch(path, auth) {
   return res.json();
 }
 
-async function fetchEventAnalytics(viz, auth) {
-  let stageId = null;
-  if (viz.programStage) stageId = typeof viz.programStage === 'string' ? viz.programStage : viz.programStage.id;
-  else if (viz.program) stageId = typeof viz.program === 'string' ? viz.program : viz.program.id;
-  if (!stageId) throw new Error("Event visualization missing program or stage ID.");
-
-  const params = [];
-  const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
-  
-  let peItems = [];
-  let ouItems = [];
-  
-  for (const axis of axes) {
-    if (axis.dimension === "pe") {
-      if (axis.items && axis.items.length) peItems = axis.items.map(i => i.id);
-    } else if (axis.dimension === "ou") {
-      if (axis.items && axis.items.length) ouItems = axis.items.map(i => i.id);
-    } else {
-      if (axis.items && axis.items.length) {
-        params.push(`dimension=${axis.dimension}:${axis.items.map(i => i.id).join(";")}`);
-      } else {
-        params.push(`dimension=${axis.dimension}`);
-      }
-    }
-  }
-  
-  const rel = viz.relativePeriods || {};
-  for (const [flag, pid] of Object.entries(RELATIVE_PERIOD_MAP)) {
-    if (rel[flag]) peItems.push(pid);
-  }
-  if (viz.userOrganisationUnit) ouItems.push("USER_ORGUNIT");
-  if (viz.userOrganisationUnitChildren) ouItems.push("USER_ORGUNIT_CHILDREN");
-  if (viz.userOrganisationUnitGrandChildren) ouItems.push("USER_ORGUNIT_GRANDCHILDREN");
-  
-  if (peItems.length) params.push(`dimension=pe:${[...new Set(peItems)].join(";")}`);
-  else params.push(`dimension=pe:LAST_12_MONTHS`);
-  
-  if (ouItems.length) params.push(`dimension=ou:${[...new Set(ouItems)].join(";")}`);
-  else params.push(`dimension=ou:USER_ORGUNIT`);
-
-  if (viz.value && viz.value.id) params.push(`value=${viz.value.id}`);
-  else if (viz.value) params.push(`value=${viz.value}`);
-
-  const url = `/api/analytics/events/aggregate/${stageId}.json?${params.join("&")}`;
-  return await dhisFetch(url, auth);
-}
-
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
+  res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
@@ -95,30 +47,62 @@ export default async function handler(req, res) {
     const eventItems = [];
 
     for (const item of rawItems) {
-      if (item.type !== "VISUALIZATION" && item.type !== "EVENT_VISUALIZATION") continue;
+      // Only process Visualizations
+      if (item.type !== "VISUALIZATION") continue;
 
-      const vizId = 
-        (typeof item.visualization === "string" ? item.visualization : item.visualization?.id) ||
-        (typeof item.eventVisualization === "string" ? item.eventVisualization : item.eventVisualization?.id) ||
-        item.id;
-
+      const vizId = typeof item.visualization === "string" ? item.visualization : item.visualization?.id;
       if (!vizId) continue;
 
       try {
-        // Strictly fetch from the eventVisualizations endpoint
-        const viz = await dhisFetch(`/api/eventVisualizations/${encodeURIComponent(vizId)}.json`, auth);
+        // Fetch the full visualization to check for Group Sets or Event logic
+        const viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json`, auth);
         
-        // If it's an event viz, process it
-        if (viz.program || viz.programStage) {
-          const data = await fetchEventAnalytics(viz, auth);
+        const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
+        const dxItems = axes.filter(a => a.dimension === "dx").flatMap(a => a.items || []);
+        
+        // If it has NO standard dx items, it requires Group Set logic
+        if (viz.type === "PIVOT_TABLE" && dxItems.length === 0) {
+          
+          const params = [];
+          
+          // 1. Add Group Set Dimensions
+          for (const axis of axes) {
+            if (axis.id && axis.id !== "pe" && axis.id !== "ou") {
+              params.push(`dimension=${axis.id}`);
+            }
+          }
+
+          // 2. Add Periods
+          const rel = viz.relativePeriods || {};
+          const peItems = [];
+          for (const [flag, pid] of Object.entries(RELATIVE_PERIOD_MAP)) {
+            if (rel[flag]) peItems.push(pid);
+          }
+          params.push(`dimension=pe:${peItems.length ? [...new Set(peItems)].join(";") : "LAST_12_MONTHS"}`);
+
+          // 3. Add Org Units
+          const ouItems = [];
+          if (viz.userOrganisationUnit) ouItems.push("USER_ORGUNIT");
+          if (viz.userOrganisationUnitChildren) ouItems.push("USER_ORGUNIT_CHILDREN");
+          if (viz.userOrganisationUnitGrandChildren) ouItems.push("USER_ORGUNIT_GRANDCHILDREN");
+          params.push(`dimension=ou:${ouItems.length ? [...new Set(ouItems)].join(";") : "USER_ORGUNIT"}`);
+
+          // 4. Fetch Analytics
+          const url = `/api/analytics.json?${params.join("&")}`;
+          const data = await dhisFetch(url, auth);
+          
           eventItems.push({
+            index: item.y * 100 + item.x, // Preserve position roughly
             id: vizId,
-            name: viz.displayName || item.displayName || "Event Chart",
-            data: data
+            name: viz.displayName || item.displayName || "Group Set Chart",
+            vizType: "PIVOT_TABLE",
+            data: data,
+            layout: { columns: viz.columns || [], rows: viz.rows || [], filters: viz.filters || [] },
+            position: { x: item.x, y: item.y, w: item.w, h: item.h }
           });
         }
       } catch (e) {
-        // Not an event viz, ignore
+        // Silently skip if it fails (it will be handled by the main endpoint)
       }
     }
 
