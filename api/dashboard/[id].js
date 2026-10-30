@@ -42,24 +42,34 @@ function isInvalidDxError(err) { return /E7124|E7102|dimension options/i.test(er
 function isMissingTableError(err) { return /42P01|referenced table does not exist/i.test(err.message) || err.dhisErrorCode === "E7103"; }
 
 async function fetchVizAndDims(vizId, auth) {
+  const fields = [
+    "id", "displayName", "type", "columns[dimension,items[id]]", "rows[dimension,items[id]]", "filters[dimension,items[id]]",
+    "relativePeriods", "userOrganisationUnit", "userOrganisationUnitChildren", "userOrganisationUnitGrandChildren", 
+    "program", "programStage"
+  ].join(",");
+
   let viz = null;
-  let isEventType = false;
 
   // 1. Try standard visualization endpoint
   try {
-    viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json`, auth);
+    viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth);
   } catch (e) {}
 
-  // 2. If standard failed OR it's missing program/stage, try Event endpoints
-  if (!viz || (!viz.program && !viz.programStage)) {
+  // 2. If it failed OR it's an Event Visualization, try the Event endpoints
+  const isEventType = viz && (
+    viz.type === "EVENT_VISUALIZATION" || 
+    viz.type === "EVENT_CHART" || 
+    viz.type === "EVENT_REPORT" || 
+    (viz.type && viz.type.startsWith("EVENT_"))
+  );
+
+  if (!viz || isEventType) {
     const endpoints = ["eventVisualizations", "eventCharts", "eventReports"];
     for (const ep of endpoints) {
       try {
-        const ev = await dhisFetch(`/api/${ep}/${encodeURIComponent(vizId)}.json`, auth);
-        // 🛠️ CRITICAL FIX: ONLY overwrite if it actually contains Event definition data!
-        if (ev && (ev.program || ev.programStage)) {
+        const ev = await dhisFetch(`/api/${ep}/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth);
+        if (ev) {
           viz = ev;
-          isEventType = true;
           break;
         }
       } catch (e) {}
@@ -92,7 +102,7 @@ async function fetchVizAndDims(vizId, auth) {
   if (!dims.pe.length) dims.pe.push("LAST_12_MONTHS");
   if (!dims.ou.length) dims.ou.push("USER_ORGUNIT");
 
-  return { viz, dims, isEventType };
+  return { viz, dims };
 }
 
 async function fetchAnalytics(dims, auth) {
@@ -221,9 +231,9 @@ export default async function handler(req, res) {
         if (!vizId) return { ...base, error: "No visualization linked to this item." };
 
         try {
-          const { viz, dims, isEventType } = await fetchVizAndDims(vizId, auth);
+          const { viz, dims } = await fetchVizAndDims(vizId, auth);
           
-          const isEvent = isEventType || !!(viz.program || viz.programStage) || viz.type === "EVENT_VISUALIZATION" || viz.type === "EVENT_CHART" || viz.type === "EVENT_REPORT";
+          const isEvent = !!(viz.program || viz.programStage) || viz.type === "EVENT_VISUALIZATION" || viz.type === "EVENT_CHART" || viz.type === "EVENT_REPORT";
           const isPivotTable = viz.type === "PIVOT_TABLE";
           const isChartable  = CHARTABLE_TYPES.has(viz.type);
 
