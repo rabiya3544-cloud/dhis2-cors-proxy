@@ -1,16 +1,8 @@
 // api/dashboard/[id].js
-// Resilient version: checks server health, tries to fetch dashboard, falls back on failure.
-// Includes Vercel Edge Caching to survive DHIS2 downtime.
+// Simplified, robust version. Directly targets the /dev server,
+// mirroring the exact logic that we know works from the client-side test.
 
-const BASE_URLS = [
-  "https://play.im.dhis2.org/dev",
-  "https://play.im.dhis2.org/stable-2-43-1",
-  "https://play.im.dhis2.org/stable-2-42-7",
-  "https://play.im.dhis2.org/stable-2-42-1",
-  "https://play.im.dhis2.org/stable-2-41-8-2",
-  "https://play.im.dhis2.org/stable-2-43-0"
-];
-
+const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/dev";
 const DEFAULT_AUTH =
   process.env.DHIS2_AUTH ||
   "Basic " + Buffer.from("admin:district").toString("base64");
@@ -53,8 +45,8 @@ function buildAuth(req) {
   return req.headers.authorization || DEFAULT_AUTH;
 }
 
-async function dhisFetch(path, auth, baseUrl) {
-  const url = `${baseUrl}${path}`;
+async function dhisFetch(path, auth) {
+  const url = `${DHIS2_BASE}${path}`;
   const res = await fetch(url, {
     headers: { Authorization: auth, Accept: "application/json" },
   });
@@ -87,7 +79,7 @@ function isMissingTableError(err) {
   );
 }
 
-async function fetchVizAndDims(vizId, auth, baseUrl) {
+async function fetchVizAndDims(vizId, auth) {
   const fields = [
     "id", "displayName", "type",
     "columns[dimension,items[id]]",
@@ -98,7 +90,7 @@ async function fetchVizAndDims(vizId, auth, baseUrl) {
     "userOrganisationUnitChildren",
     "userOrganisationUnitGrandChildren",
   ].join(",");
-  const viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth, baseUrl);
+  const viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth);
   
   const dims = { dx: [], pe: [], ou: [] };
   const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
@@ -128,7 +120,7 @@ async function fetchVizAndDims(vizId, auth, baseUrl) {
   return { viz, dims };
 }
 
-async function fetchAnalytics(dims, auth, baseUrl) {
+async function fetchAnalytics(dims, auth) {
   const buildUrl = dxItems => {
     const params = [
       `dimension=dx:${dxItems.join(";")}`,
@@ -139,7 +131,7 @@ async function fetchAnalytics(dims, auth, baseUrl) {
   };
 
   try {
-    return await dhisFetch(buildUrl(dims.dx), auth, baseUrl);
+    return await dhisFetch(buildUrl(dims.dx), auth);
   } catch (err) {
     if (!isInvalidDxError(err)) throw err;
   }
@@ -148,7 +140,7 @@ async function fetchAnalytics(dims, auth, baseUrl) {
   for (const metric of REPORTING_METRICS) {
     const dxWithMetric = dims.dx.map(id => id.includes(".") ? id : `${id}.${metric}`);
     try {
-      return await dhisFetch(buildUrl(dxWithMetric), auth, baseUrl);
+      return await dhisFetch(buildUrl(dxWithMetric), auth);
     } catch (err) {
       lastErr = err;
       if (!isInvalidDxError(err)) throw err;
@@ -171,13 +163,9 @@ async function pMap(items, fn, concurrency = 5) {
 }
 
 export default async function handler(req, res) {
-  // --- CORS & CACHING HEADERS ---
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
-  
-  // Cache the successful response at Vercel's edge for 1 hour.
-  // If DHIS2 goes down, Vercel will serve the cached version.
   res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
 
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -188,46 +176,14 @@ export default async function handler(req, res) {
 
   const auth = buildAuth(req);
 
-  let workingBaseUrl = null;
-  let dash = null;
-  let lastError = null;
-
-  // --- 1. FIND A WORKING SERVER ---
-  for (const baseUrl of BASE_URLS) {
-    try {
-      // Quick check: is the server alive?
-      await dhisFetch("/api/system/info.json", auth, baseUrl);
-      
-      // If alive, try to fetch the dashboard (this is where analytics tables are tested)
-      dash = await dhisFetch(
-        `/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`,
-        auth, baseUrl
-      );
-      
-      // If we got here, both the server and its analytics tables are working
-      workingBaseUrl = baseUrl;
-      console.log(`[dashboard aggregator] Using working server: ${baseUrl}`);
-      break;
-
-    } catch (err) {
-      console.warn(`[dashboard aggregator] Server ${baseUrl} failed: ${err.message}`);
-      lastError = err;
-      dash = null;
-    }
-  }
-
-  if (!workingBaseUrl || !dash) {
-    return res.status(500).json({
-      error: "All DHIS2 servers are unreachable or their analytics tables are currently missing.",
-      details: lastError?.message,
-    });
-  }
-
-  // --- 2. FETCH DASHBOARD ITEMS ---
   try {
+    // 1. Fetch dashboard definition
+    const dash = await dhisFetch(`/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`, auth);
+
     const rawItems = dash.dashboardItems || [];
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
+    // 2. Resolve each item
     const items = await pMap(
       rawItems,
       async (item, idx) => {
@@ -247,8 +203,8 @@ export default async function handler(req, res) {
           return {
             ...base,
             mapId,
-            mapLink: mapId ? `${workingBaseUrl}/dhis-web-maps/#/${mapId}` : null,
-            dashboardLink: `${workingBaseUrl}/dhis-web-dashboard/#/${id}`,
+            mapLink: mapId ? `${DHIS2_BASE}/dhis-web-maps/#/${mapId}` : null,
+            dashboardLink: `${DHIS2_BASE}/dhis-web-dashboard/#/${id}`,
           };
         }
 
@@ -260,7 +216,7 @@ export default async function handler(req, res) {
         if (!vizId) return { ...base, error: "No visualization linked to this item." };
 
         try {
-          const { viz, dims } = await fetchVizAndDims(vizId, auth, workingBaseUrl);
+          const { viz, dims } = await fetchVizAndDims(vizId, auth);
           const isPivotTable = viz.type === "PIVOT_TABLE";
           const isChartable  = CHARTABLE_TYPES.has(viz.type);
 
@@ -268,7 +224,7 @@ export default async function handler(req, res) {
             return { ...base, name: viz.displayName || base.name, skipped: true, reason: `${viz.type} not supported` };
           }
 
-          const data = await fetchAnalytics(dims, auth, workingBaseUrl);
+          const data = await fetchAnalytics(dims, auth);
 
           if (isPivotTable) {
             return {
@@ -283,8 +239,9 @@ export default async function handler(req, res) {
           return { ...base, name: viz.displayName || base.name, vizType: viz.type, data };
 
         } catch (err) {
+          // Gracefully handle missing analytics tables for specific items
           if (isMissingTableError(err)) {
-            return { ...base, error: "Data unavailable: The server's analytics tables are currently being rebuilt. Please try again later." };
+            return { ...base, error: "Data unavailable: The server's analytics tables for this specific chart are currently being rebuilt." };
           }
           return { ...base, error: err.message };
         }
