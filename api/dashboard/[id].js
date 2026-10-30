@@ -157,7 +157,7 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
-  res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
+  res.setHeader("Cache-Control", "no-store, max-age=0");
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
@@ -175,14 +175,13 @@ export default async function handler(req, res) {
     // --- FETCH MESSAGES (INTERPRETATIONS) ---
     let dashboardMessages = [];
     let rawMessages = [];
+    let matchDebug = [];
     
     try {
       const interpUrl = `/api/interpretations.json?pageSize=500&fields=id,text,created,user[displayName],comments[text,created,user[displayName]],visualization[id],map[id],eventVisualization[id],eventReport[id],eventChart[id]`;
       const interpData = await dhisFetch(interpUrl, auth);
       rawMessages = interpData.interpretations || [];
 
-      // 🛠️ BRUTE-FORCE FIX: Stringify the dashboard items. 
-      // If the ID appears ANYWHERE in the JSON, it belongs to this dashboard.
       const dashItemsString = JSON.stringify(rawItems);
 
       dashboardMessages = rawMessages.filter(interp => {
@@ -193,7 +192,15 @@ export default async function handler(req, res) {
           interp.eventReport?.id || 
           interp.eventChart?.id;
           
-        return linkedId && dashItemsString.includes(linkedId);
+        const isMatch = linkedId && dashItemsString.includes(linkedId);
+        
+        matchDebug.push({
+          textSnippet: interp.text.substring(0, 30),
+          linkedId: linkedId || "NO_ID",
+          foundInDashboard: isMatch
+        });
+
+        return isMatch;
       });
 
     } catch (e) {
@@ -211,7 +218,8 @@ export default async function handler(req, res) {
         };
 
         if (item.type === "TEXT") return { ...base, text: item.text || "" };
-        if (item.type === "MESSAGES") return { ...base, messages: dashboardMessages, rawMessages: rawMessages };
+        
+        if (item.type === "MESSAGES") return { ...base, messages: dashboardMessages, rawMessages: rawMessages, matchDebug: matchDebug };
 
         if (item.type === "MAP") {
           const mapId = item.map?.id || (typeof item.map === "string" ? item.map : null) || item.visualization?.id || null;
@@ -225,7 +233,7 @@ export default async function handler(req, res) {
         const vizId = 
           (typeof item.visualization === "string" ? item.visualization : item.visualization?.id) ||
           (typeof item.eventVisualization === "string" ? item.eventVisualization : item.eventVisualization?.id) ||
-          item.id; // Fallback to primary ID
+          item.id;
           
         if (!vizId) return { ...base, error: "No visualization linked to this item." };
 
@@ -265,8 +273,6 @@ export default async function handler(req, res) {
       5
     );
 
-    // 🛠️ INJECT MESSAGES CARD IF MISSING
-    // If DHIS2 didn't send a MESSAGES widget, but we found messages, we inject it here.
     if (dashboardMessages.length > 0 && !items.some(i => i.type === "MESSAGES")) {
       items.push({
         index: items.length,
@@ -274,7 +280,8 @@ export default async function handler(req, res) {
         name: "Messages",
         position: { x: 0, y: 0, w: 0, h: 0 },
         messages: dashboardMessages,
-        rawMessages: rawMessages
+        rawMessages: rawMessages,
+        matchDebug: matchDebug
       });
     }
 
