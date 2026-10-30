@@ -1,5 +1,5 @@
 // api/dashboard/[id].js
-const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/dev";
+const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/stable-2-43-2-1";
 const DEFAULT_AUTH = process.env.DHIS2_AUTH || "Basic " + Buffer.from("admin:district").toString("base64");
 
 const RELATIVE_PERIOD_MAP = {
@@ -172,12 +172,24 @@ export default async function handler(req, res) {
     const rawItems = dash.dashboardItems || [];
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
-    // Fetch interpretations specifically for this dashboard
+    // --- FETCH MESSAGES (INTERPRETATIONS) ---
     let dashboardMessages = [];
     if (rawItems.some(i => i.type === "MESSAGES")) {
+      const vizIds = rawItems
+        .filter(i => i.type === "VISUALIZATION" || i.type === "MAP")
+        .map(i => i.visualization?.id || i.map?.id || i.visualization || i.map)
+        .filter(id => typeof id === "string");
+
       try {
-        const interpData = await dhisFetch(`/api/interpretations.json?filter=type:eq:DASHBOARD&filter=object.id:eq:${id}&fields=id,text,created,user[displayName],comments[text,created,user[displayName]]&paging=false`, auth);
-        dashboardMessages = interpData.interpretations || [];
+        const interpData = await dhisFetch(
+          `/api/interpretations.json?pageSize=100&fields=id,text,created,user[displayName],comments[text,created,user[displayName]],visualization[id]`, 
+          auth
+        );
+        const allInterps = interpData.interpretations || [];
+        
+        dashboardMessages = allInterps.filter(interp => 
+          interp.visualization && vizIds.includes(interp.visualization.id)
+        );
       } catch (e) {
         console.warn("Could not fetch interpretations:", e.message);
       }
