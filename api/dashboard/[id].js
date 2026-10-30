@@ -1,17 +1,14 @@
 // api/dashboard/[id].js
-//
-// Server-side aggregator: fetches a dashboard, then for each item it resolves
-// the visualization definition, extracts dimensions, and fetches analytics data.
-// Returns one combined JSON to the browser.
-//
-// Supports: VISUALIZATION (charts + pivot tables), TEXT, MAP.
-// Other types (APP, EVENT_*, MESSAGES, ...) are reported as skipped.
-//
-// Route: GET /api/dashboard/{dashboardId}
-// Env:   DHIS2_BASE  (default: https://play.im.dhis2.org/dev)
-//        DHIS2_AUTH  (default: Basic admin:district, base64)
+// Resilient version: tries multiple DHIS2 base URLs by testing a real analytics query.
+// If a server is alive but its analytics tables are missing (42P01), it skips to the next.
 
-const DHIS2_BASE = process.env.DHIS2_BASE || "https://play.im.dhis2.org/stable-2-43-2-1";
+const BASE_URLS = [
+  "https://play.im.dhis2.org/dev",
+  "https://play.im.dhis2.org/stable-2-43-2-1",
+  "https://play.im.dhis2.org/stable-2-42-7-1",
+  "https://play.im.dhis2.org/stable-2-41-10-1"
+];
+
 const DEFAULT_AUTH =
   process.env.DHIS2_AUTH ||
   "Basic " + Buffer.from("admin:district").toString("base64");
@@ -50,22 +47,19 @@ const REPORTING_METRICS = [
   "EXPECTED_REPORTS",
 ];
 
-// ---------- helpers ----------
 function buildAuth(req) {
   return req.headers.authorization || DEFAULT_AUTH;
 }
 
-async function dhisFetch(path, auth) {
-  const res = await fetch(`${DHIS2_BASE}${path}`, {
+async function dhisFetch(path, auth, baseUrl) {
+  const url = `${baseUrl}${path}`;
+  const res = await fetch(url, {
     headers: { Authorization: auth, Accept: "application/json" },
   });
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
     const peek = await res.text();
-    throw new Error(
-      `Expected JSON but got "${ct}". First 120 chars: ` +
-        peek.slice(0, 120).replace(/\s+/g, " ")
-    );
+    throw new Error(`Expected JSON but got "${ct}". First 120 chars: ` + peek.slice(0, 120).replace(/\s+/g, " "));
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -84,7 +78,14 @@ function isInvalidDxError(err) {
   );
 }
 
-async function fetchVizAndDims(vizId, auth) {
+function isMissingTableError(err) {
+  return (
+    /42P01|referenced table does not exist/i.test(err.message) ||
+    err.dhisErrorCode === "E7103"
+  );
+}
+
+async function fetchVizAndDims(vizId, auth, baseUrl) {
   const fields = [
     "id", "displayName", "type",
     "columns[dimension,items[id]]",
@@ -95,16 +96,10 @@ async function fetchVizAndDims(vizId, auth) {
     "userOrganisationUnitChildren",
     "userOrganisationUnitGrandChildren",
   ].join(",");
-  const viz = await dhisFetch(
-    `/api/visualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`,
-    auth
-  );
+  const viz = await dhisFetch(`/api/visualizations/${encodeURIComponent(vizId)}.json?fields=${fields}`, auth, baseUrl);
+  
   const dims = { dx: [], pe: [], ou: [] };
-  const axes = [
-    ...(viz.columns || []),
-    ...(viz.rows || []),
-    ...(viz.filters || []),
-  ];
+  const axes = [...(viz.columns || []), ...(viz.rows || []), ...(viz.filters || [])];
   for (const axis of axes) {
     if (!dims[axis.dimension] || !Array.isArray(axis.items)) continue;
     for (const item of axis.items) {
@@ -131,7 +126,7 @@ async function fetchVizAndDims(vizId, auth) {
   return { viz, dims };
 }
 
-async function fetchAnalytics(dims, auth) {
+async function fetchAnalytics(dims, auth, baseUrl) {
   const buildUrl = dxItems => {
     const params = [
       `dimension=dx:${dxItems.join(";")}`,
@@ -141,21 +136,17 @@ async function fetchAnalytics(dims, auth) {
     return `/api/analytics.json?${params.join("&")}`;
   };
 
-  // 1st attempt: raw IDs (indicators, data elements)
   try {
-    return await dhisFetch(buildUrl(dims.dx), auth);
+    return await dhisFetch(buildUrl(dims.dx), auth, baseUrl);
   } catch (err) {
     if (!isInvalidDxError(err)) throw err;
   }
 
-  // 2nd attempt: with reporting-rate suffix (data sets)
   let lastErr;
   for (const metric of REPORTING_METRICS) {
-    const dxWithMetric = dims.dx.map(id =>
-      id.includes(".") ? id : `${id}.${metric}`
-    );
+    const dxWithMetric = dims.dx.map(id => id.includes(".") ? id : `${id}.${metric}`);
     try {
-      return await dhisFetch(buildUrl(dxWithMetric), auth);
+      return await dhisFetch(buildUrl(dxWithMetric), auth, baseUrl);
     } catch (err) {
       lastErr = err;
       if (!isInvalidDxError(err)) throw err;
@@ -164,7 +155,6 @@ async function fetchAnalytics(dims, auth) {
   throw lastErr;
 }
 
-// Concurrency-limited parallel map
 async function pMap(items, fn, concurrency = 5) {
   const results = new Array(items.length);
   let i = 0;
@@ -174,20 +164,14 @@ async function pMap(items, fn, concurrency = 5) {
       results[idx] = await fn(items[idx], idx);
     }
   };
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, worker)
-  );
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
   return results;
 }
 
-// ---------- handler ----------
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
-  // Cache the successful response at Vercel's edge for 1 hour.
-  // If DHIS2 goes down, Vercel will serve the cached version.
-  res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
@@ -197,17 +181,44 @@ export default async function handler(req, res) {
 
   const auth = buildAuth(req);
 
+  // --- 1. FIND A WORKING SERVER WITH BUILT ANALYTICS TABLES ---
+  let workingBaseUrl = null;
+  let lastError = null;
+
+  // We do a small, guaranteed analytics query to see if tables are built.
+  // fbfJHSPpUQD is "ANC 1 Coverage" (standard demo data).
+  const probePath = "/api/analytics.json?dimension=dx:fbfJHSPpUQD&dimension=pe:LAST_YEAR&dimension=ou:USER_ORGUNIT";
+
+  for (const baseUrl of BASE_URLS) {
+    try {
+      // If this succeeds (200 OK), the server is alive AND the analytics tables are built.
+      await dhisFetch(probePath, auth, baseUrl);
+      workingBaseUrl = baseUrl;
+      console.log(`[dashboard aggregator] Using working server: ${baseUrl}`);
+      break;
+    } catch (err) {
+      console.warn(`[dashboard aggregator] Server ${baseUrl} failed probe: ${err.message}`);
+      lastError = err;
+    }
+  }
+
+  if (!workingBaseUrl) {
+    return res.status(500).json({
+      error: "All DHIS2 servers are either unreachable or their analytics tables are currently missing.",
+      details: lastError?.message,
+    });
+  }
+
+  // --- 2. FETCH DASHBOARD AND ITEMS ---
   try {
-    // 1. Fetch dashboard definition
     const dash = await dhisFetch(
       `/api/dashboards/${encodeURIComponent(id)}.json?fields=:all,dashboardItems[:all]`,
-      auth
+      auth, workingBaseUrl
     );
 
     const rawItems = dash.dashboardItems || [];
     rawItems.sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
-    // 2. Resolve each item
     const items = await pMap(
       rawItems,
       async (item, idx) => {
@@ -218,97 +229,65 @@ export default async function handler(req, res) {
           position: { x: item.x, y: item.y, w: item.w, h: item.h },
         };
 
-        // ---------- TEXT ----------
         if (item.type === "TEXT") {
           return { ...base, text: item.text || "" };
         }
 
-        // ---------- MAP ----------
         if (item.type === "MAP") {
-          const mapId =
-            item.map?.id ||
-            (typeof item.map === "string" ? item.map : null) ||
-            item.visualization?.id ||
-            null;
+          const mapId = item.map?.id || (typeof item.map === "string" ? item.map : null) || item.visualization?.id || null;
           return {
             ...base,
             mapId,
-            mapLink: mapId
-              ? `${DHIS2_BASE}/dhis-web-maps/#/${mapId}`
-              : null,
-            dashboardLink: `${DHIS2_BASE}/dhis-web-dashboard/#/${id}`,
+            mapLink: mapId ? `${workingBaseUrl}/dhis-web-maps/#/${mapId}` : null,
+            dashboardLink: `${workingBaseUrl}/dhis-web-dashboard/#/${id}`,
           };
         }
 
-        // ---------- OTHER non-visualization types ----------
         if (item.type !== "VISUALIZATION") {
           return { ...base, skipped: true, reason: `${item.type} not supported` };
         }
 
-        // ---------- VISUALIZATION ----------
-        const vizId =
-          typeof item.visualization === "string"
-            ? item.visualization
-            : item.visualization?.id;
-
+        const vizId = typeof item.visualization === "string" ? item.visualization : item.visualization?.id;
         if (!vizId) return { ...base, error: "No visualization linked to this item." };
 
         try {
-          const { viz, dims } = await fetchVizAndDims(vizId, auth);
-
+          const { viz, dims } = await fetchVizAndDims(vizId, auth, workingBaseUrl);
           const isPivotTable = viz.type === "PIVOT_TABLE";
           const isChartable  = CHARTABLE_TYPES.has(viz.type);
 
           if (!isPivotTable && !isChartable) {
-            return {
-              ...base,
-              name: viz.displayName || base.name,
-              skipped: true,
-              reason: `${viz.type} not supported`,
-            };
+            return { ...base, name: viz.displayName || base.name, skipped: true, reason: `${viz.type} not supported` };
           }
 
-          const data = await fetchAnalytics(dims, auth);
+          const data = await fetchAnalytics(dims, auth, workingBaseUrl);
 
-          // ---- PIVOT TABLE ----
           if (isPivotTable) {
             return {
               ...base,
               name: viz.displayName || base.name,
               vizType: "PIVOT_TABLE",
               data,
-              layout: {
-                columns: viz.columns || [],
-                rows:    viz.rows    || [],
-                filters: viz.filters || [],
-              },
+              layout: { columns: viz.columns || [], rows: viz.rows || [], filters: viz.filters || [] },
             };
           }
 
-          // ---- CHART ----
-          return {
-            ...base,
-            name: viz.displayName || base.name,
-            vizType: viz.type,
-            data,
-          };
+          return { ...base, name: viz.displayName || base.name, vizType: viz.type, data };
+
         } catch (err) {
+          if (isMissingTableError(err)) {
+            return { ...base, error: "Data unavailable: The server's analytics tables are currently being rebuilt. Please try again later." };
+          }
           return { ...base, error: err.message };
         }
       },
       5
     );
 
-    // 3. Return combined payload
     res.status(200).json({
-      dashboard: {
-        id: dash.id,
-        name: dash.displayName || dash.name || id,
-        itemCount: items.length,
-        loadedAt: new Date().toISOString(),
-      },
+      dashboard: { id: dash.id, name: dash.displayName || dash.name || id, itemCount: items.length, loadedAt: new Date().toISOString() },
       items,
     });
+
   } catch (err) {
     console.error("[dashboard aggregator]", err);
     res.status(500).json({ error: err.message });
